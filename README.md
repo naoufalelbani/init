@@ -4,7 +4,7 @@
 
 ## Status
 
-The Go CLI, deterministic project analysis, managed `AGENTS.md` generation, documented agent adapters, persistent evidence-based context, port allocation, disposable-worktree integration, doctor, and reusable prompt library are implemented. Stack hints cover common Go, Rust, Dart/Flutter, Python, JavaScript/TypeScript, Java, C#/.NET, and CMake/Qt projects. Graphify and Serena are detected as available context sources, but ai-init does not invoke their APIs. Detection is intentionally conservative and does not infer full UI/backend boundaries, lint conventions, or database isolation.
+The Go CLI, deterministic project analysis, managed `AGENTS.md` generation, documented agent adapters, persistent evidence-based context, port allocation, disposable-worktree integration, optional staged-content hooks, cautious `.gitattributes` setup, doctor, and reusable prompt library are implemented. Stack hints cover common Go, Rust, Dart/Flutter, Python, JavaScript/TypeScript, Java, C#/.NET, and CMake/Qt projects. Graphify and Serena are detected as available context sources, but ai-init does not invoke their APIs. Detection is intentionally conservative and does not infer full UI/backend boundaries, lint conventions, or database isolation.
 
 ## Install
 
@@ -38,6 +38,7 @@ ai-init setup --path "../my project" --dry-run
 ai-init setup --diff
 ai-init setup --with agents,memory,worktrees
 ai-init setup --with gitattributes
+ai-init setup --with hooks
 ai-init setup --adapters claude,cursor,copilot,aider
 ai-init agents audit
 ai-init agents sync --diff
@@ -54,8 +55,10 @@ ai-init memory update
 - `wt new <task> [--ide ADAPTER] [--port SERVICE] [--env NAME]`: create an `agent/<task>` branch in a sibling worktree directory and optionally configure instructions, allocate ports, or propagate explicitly selected process environment variables. Creation serializes concurrent ai-init processes; failed setup rolls back the newly created branch, worktree, ignore entries, environment snapshot, and port allocations. IDE windows are not launched automatically yet.
 - `wt list|status [task]|sync <task> [--dry-run]|integrate <task> [--dry-run]|cleanup <task> [--dry-run]`: inspect, preview or sync, validate and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch.
 - `ports allocate|list|release`: manage explicit, per-task service port records.
+- `hooks check-staged`: manually run the optional pre-commit checks against the Git index.
 - `prompt agents|worktrees|audit|config`: display a reusable prompt or export it with `--output FILE` (existing files are never overwritten).
 - `setup --with gitattributes`: add managed cross-platform text rules only when `.gitattributes` is absent and the Git index has no tracked files. Existing custom files and tracked repositories are preserved; setup never renormalizes existing files.
+- `setup --with hooks`: install a local pre-commit check only when Git is using its default hooks path, no hook already exists, and `ai-init` is on `PATH` for Git to invoke. `ai-init hooks check-staged` can also be run directly.
 - `doctor`, `version`, `help`.
 
 ## Agent configuration
@@ -97,7 +100,7 @@ Use focused changes, Go formatting, and standard library APIs where practical. R
 - Environment values are never copied by default. Each repeated `--env NAME` explicitly selects a variable from ai-init's process environment. Selected values are stored in the ignored `.ai-init.env.json` task-local file and named in the task primer; the values are never printed. Treat this file as sensitive, review it before sharing the workspace, and do not commit it. On Windows the file inherits the containing directory's ACL; on Unix it is created with owner-only permissions.
 - A free port is chosen and recorded, then its temporary socket is closed. The record is not a persistent socket reservation, and ai-init does not automatically inject environment variables into a service process.
 - Graphify and Serena are detected but not called through their tool interfaces.
-- Setup does not propagate environment files, install Git hooks, or isolate databases. `.gitattributes` support is explicit opt-in and is skipped when tracked files exist, because applying text attributes can make existing checkouts appear modified. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
+- Setup does not propagate environment files or isolate databases. `.gitattributes` support is explicit opt-in and is skipped when tracked files exist, because applying text attributes can make existing checkouts appear modified. Git hook checks are local safeguards, inspect staged additions only, and can be bypassed; existing/custom hook systems are preserved. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
 - Existing unmarked agent configuration is preserved as-is; run the corresponding tool's own validator after manual edits.
 - Static detection may miss monorepo packages, custom scripts, and project-specific test conventions; inspect `analyze` output before relying on generated hints.
 

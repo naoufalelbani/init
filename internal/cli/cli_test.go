@@ -1070,3 +1070,52 @@ func TestSetupGitattributesDryRunAndMalformedMarkers(t *testing.T) {
 		t.Fatalf("malformed block was modified: %q err=%v", after, err)
 	}
 }
+
+func TestSetupHooksInstallsAndExposesStagedChecks(t *testing.T) {
+	putFakeAIInitOnPathCLI(t)
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	root, _ := integrationFixture(t, "pre-commit hooks")
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--with", "hooks"}, &output, &output); err != nil {
+		t.Fatalf("setup hooks: %v\n%s", err, output.String())
+	}
+	hooksDir, err := git(root, "rev-parse", "--git-path", "hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(hooksDir) {
+		hooksDir = filepath.Join(root, hooksDir)
+	}
+	hook, err := os.ReadFile(filepath.Join(hooksDir, "pre-commit"))
+	if err != nil || !strings.Contains(string(hook), "exec ai-init hooks check-staged") {
+		t.Fatalf("setup did not install the expected hook: %q (%v)", hook, err)
+	}
+	output.Reset()
+	if err = Run([]string{"hooks", "check-staged", "--path", root}, &output, &output); err != nil {
+		t.Fatalf("staged check command: %v\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "Staged-content safeguards passed") {
+		t.Fatalf("staged check result missing: %s", output.String())
+	}
+}
+
+func putFakeAIInitOnPathCLI(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	name := "ai-init"
+	content := []byte("#!/bin/sh\nexit 0\n")
+	if runtime.GOOS == "windows" {
+		name = "ai-init.cmd"
+		content = []byte("@echo off\r\nexit /b 0\r\n")
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, content, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}

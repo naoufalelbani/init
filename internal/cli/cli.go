@@ -19,6 +19,7 @@ import (
 
 	agentcfg "github.com/naoufalelbani/init/internal/agents"
 	envprop "github.com/naoufalelbani/init/internal/environment"
+	hookguard "github.com/naoufalelbani/init/internal/hooks"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
@@ -61,6 +62,8 @@ func Run(args []string, out, errOut io.Writer) error {
 		return memory(args[1:], out)
 	case "ports":
 		return ports(args[1:], out)
+	case "hooks":
+		return hooks(args[1:], out)
 	case "prompt":
 		return prompt(args[1:], out)
 	case "wt":
@@ -73,11 +76,12 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `ai-init initializes AI-assisted development environments.
 
 Usage:
-  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory,gitattributes]
+  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory,gitattributes,hooks]
   ai-init analyze [--path DIR]
   ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME] [--diff]
   ai-init memory generate|update [--path DIR]
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
+  ai-init hooks check-staged [--path DIR]
   ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--dry-run]
   ai-init wt list|status|sync|integrate|cleanup [TASK]
   ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
@@ -378,7 +382,7 @@ func setup(args []string, w io.Writer) error {
 	path := fs.String("path", ".", "project path")
 	dry := fs.Bool("dry-run", false, "preview without writing")
 	diff := fs.Bool("diff", false, "show AGENTS.md changes without writing")
-	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory,gitattributes")
+	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory,gitattributes,hooks")
 	adapters := fs.String("adapters", "", "comma-separated agent adapters; empty detects existing configuration")
 	verbose := fs.Bool("verbose", false, "show details")
 	if e := fs.Parse(args); e != nil {
@@ -397,7 +401,7 @@ func setup(args []string, w io.Writer) error {
 	selected := map[string]bool{}
 	for _, v := range strings.Split(*with, ",") {
 		name := strings.TrimSpace(v)
-		if name != "agents" && name != "worktrees" && name != "memory" && name != "gitattributes" {
+		if name != "agents" && name != "worktrees" && name != "memory" && name != "gitattributes" && name != "hooks" {
 			return fmt.Errorf("unknown setup component %q", name)
 		}
 		selected[name] = true
@@ -445,6 +449,11 @@ func setup(args []string, w io.Writer) error {
 	}
 	if selected["gitattributes"] {
 		if e := writeGitAttributes(root, p.Git, *dry, w); e != nil {
+			return e
+		}
+	}
+	if selected["hooks"] {
+		if e := hookguard.Install(root, *dry, w); e != nil {
 			return e
 		}
 	}
@@ -1090,6 +1099,20 @@ func ports(args []string, w io.Writer) error {
 	default:
 		return fmt.Errorf("unknown ports action %q", args[0])
 	}
+}
+
+func hooks(args []string, w io.Writer) error {
+	if len(args) == 0 || args[0] != "check-staged" {
+		return errors.New("usage: ai-init hooks check-staged [--path DIR]")
+	}
+	root, rest, err := target(args[1:])
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("unexpected hooks check-staged arguments: %s", strings.Join(rest, " "))
+	}
+	return hookguard.CheckStaged(root, w)
 }
 func prompt(args []string, w io.Writer) error {
 	if len(args) == 0 {
