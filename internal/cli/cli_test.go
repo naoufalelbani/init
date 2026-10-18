@@ -436,6 +436,9 @@ func TestMemoryGeneratesEvidenceFilesAndPreservesManualNotes(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "src"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("package main\nfunc main() { println(\"private source body\") }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, ".editorconfig"), []byte("root=true\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -450,6 +453,13 @@ func TestMemoryGeneratesEvidenceFilesAndPreservesManualNotes(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, ".ai", name)); err != nil {
 			t.Fatalf("%s not generated: %v", name, err)
 		}
+	}
+	projectMap, err := os.ReadFile(filepath.Join(root, ".ai", "PROJECT_MAP.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(projectMap), "src/main.go") || strings.Contains(string(projectMap), "private source body") {
+		t.Fatalf("project map must inventory source paths without copying source content: %s", projectMap)
 	}
 	path := filepath.Join(root, ".ai", "DECISIONS.md")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)

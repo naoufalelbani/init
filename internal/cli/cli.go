@@ -20,6 +20,7 @@ import (
 	"github.com/naoufalelbani/init/internal/analyzer"
 	envprop "github.com/naoufalelbani/init/internal/environment"
 	hookguard "github.com/naoufalelbani/init/internal/hooks"
+	"github.com/naoufalelbani/init/internal/indexing"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
@@ -682,6 +683,10 @@ func writeGitAttributes(root string, gitRepo, dry bool, w io.Writer) error {
 }
 
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
+	inventory, err := indexing.Discover(root, p.Git)
+	if err != nil {
+		return fmt.Errorf("discover project source files: %w", err)
+	}
 	branch, head := "unknown", "unknown"
 	if p.Git {
 		if value, e := git(root, "branch", "--show-current"); e == nil && value != "" {
@@ -691,8 +696,12 @@ func writeMemory(root string, p project, dry bool, w io.Writer) error {
 			head = value
 		}
 	}
+	inventoryStatus := fmt.Sprintf("%s; showing %d of %d source files", inventory.Source, len(inventory.Files), inventory.Total)
+	if inventory.Truncated {
+		inventoryStatus += " (list truncated)"
+	}
 	items := map[string]string{
-		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from root manifests and directories. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Dependency managers: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n", markdownFacts([]string{p.Name}), markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.DependencyManagers), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), markdownFacts(p.Build), markdownFacts(p.Tests)),
+		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from repository metadata and source paths only. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Dependency managers: %s\n- Source directories: %s\n- Entry points: %s\n- Source file inventory (%s): %s\n- Build hints: %s\n- Test hints: %s\n", markdownFacts([]string{p.Name}), markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.DependencyManagers), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), inventoryStatus, markdownFacts(inventory.Files), markdownFacts(p.Build), markdownFacts(p.Tests)),
 		"ARCHITECTURE.md":  fmt.Sprintf("# Architecture context\n\n## Verified repository facts\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Platform and deployment evidence: %s\n- Build hints: %s\n- Test hints: %s\n\n## Boundaries\nThe deterministic scan does not infer UI/backend or module ownership boundaries. Treat those as unknown until confirmed in source and project documentation.\n", markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), markdownFacts(p.PlatformRequirements), markdownFacts(p.Build), markdownFacts(p.Tests)),
 		"CONVENTIONS.md":   fmt.Sprintf("# Detected conventions\n\nFormatting and lint configuration files: %s. Their contents define the authoritative rules. Git convention files: %s. Dependency managers: %s. Existing agent instruction sources: %s. No additional naming or style conventions are inferred here.\n", markdownFacts(p.Configurations), markdownFacts(p.GitConventions), markdownFacts(p.DependencyManagers), markdownFacts(p.AgentInstructions)),
 		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n", p.Git, markdownFacts([]string{branch}), markdownFacts([]string{head}), markdownFacts(p.Indexers)),
