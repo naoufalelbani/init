@@ -1,3 +1,3 @@
-module github.com/ai-init/ai-init
+module github.com/naoufalelbani/init
 
 go 1.23

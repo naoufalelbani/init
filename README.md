@@ -11,13 +11,13 @@ This project is an early, usable foundation. Setup, deterministic stack detectio
 Requires Go 1.23+ to build. Prebuilt releases will be published through GitHub Releases when release automation is enabled.
 
 ```sh
-go install github.com/ai-init/ai-init/cmd/ai-init@latest
+go install github.com/naoufalelbani/init/cmd/ai-init@latest
 ```
 
 Or build locally:
 
 ```sh
-git clone https://github.com/ai-init/ai-init.git
+git clone https://github.com/naoufalelbani/init.git
 cd ai-init
 go build -o ai-init ./cmd/ai-init
 ```

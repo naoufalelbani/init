@@ -1,0 +1,2 @@
+# Generate project instructions
+Inspect the repository before writing. Read existing `AGENTS.md` and other instructions. Identify languages, frameworks, build files, source folders, test tools, and repository conventions from files that exist. Mark uncertain details unknown. Preserve custom rules, propose only minimal changes, avoid duplicating sections, and explain evidence. Never impose a new architecture or language. Preview changes before writing and retain a recoverable backup.

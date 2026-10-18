@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"flag"
@@ -171,7 +170,11 @@ func setup(args []string, w io.Writer) error {
 	printProject(w, root, p)
 	selected := map[string]bool{}
 	for _, v := range strings.Split(*with, ",") {
-		selected[strings.TrimSpace(v)] = true
+		name := strings.TrimSpace(v)
+		if name != "agents" && name != "worktrees" && name != "memory" {
+			return fmt.Errorf("unknown setup component %q", name)
+		}
+		selected[name] = true
 	}
 	fmt.Fprintln(w, "\nSetup:")
 	if selected["agents"] {
@@ -260,18 +263,27 @@ func agentsTemplate(p project) string {
 }
 func writeAgents(root string, p project, dry bool, w io.Writer) error {
 	path := filepath.Join(root, "AGENTS.md")
-	existing, e := os.ReadFile(path)
-	if e == nil {
-		if bytes.Contains(existing, []byte("<!-- ai-init: managed facts -->")) {
-			return writeFileSafe(path, "<!-- ai-init: managed facts -->\n"+agentsTemplate(p), dry, w)
+	existing, err := os.ReadFile(path)
+	start, end := "<!-- ai-init:begin -->", "<!-- ai-init:end -->"
+	if err == nil {
+		text := string(existing)
+		begin := strings.Index(text, start)
+		if begin >= 0 {
+			relativeEnd := strings.Index(text[begin:], end)
+			if relativeEnd < 0 {
+				return errors.New("managed AGENTS.md block has no end marker; preserving file")
+			}
+			finish := begin + relativeEnd + len(end)
+			updated := text[:begin] + start + "\n" + agentsTemplate(p) + "\n" + end + text[finish:]
+			return writeFileSafe(path, updated, dry, w)
 		}
 		fmt.Fprintf(w, "  preserved %s (custom instructions detected; use agents sync to inspect)\n", path)
 		return nil
 	}
-	if !os.IsNotExist(e) {
-		return e
+	if !os.IsNotExist(err) {
+		return err
 	}
-	return writeFileSafe(path, "<!-- ai-init: managed facts -->\n"+agentsTemplate(p), dry, w)
+	return writeFileSafe(path, start+"\n"+agentsTemplate(p)+"\n"+end+"\n", dry, w)
 }
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
 	content := fmt.Sprintf("# Project map\n\nGenerated from repository files on %s. Verify details against source.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Build hints: %s\n- Test hints: %s\n", time.Now().Format("2006-01-02"), p.Name, joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.Build), joinOrUnknown(p.Tests))
@@ -341,12 +353,148 @@ func doctor(w io.Writer) error {
 	}
 	return nil
 }
+func git(root string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
 func worktrees(args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ai-init wt new|list|status|sync|integrate|cleanup [task]")
 	}
-	fmt.Fprintln(w, "Worktree support requires a Git repository. This command is not yet available in this build.")
-	return nil
+	here, err := filepath.Abs(".")
+	if err != nil {
+		return err
+	}
+	root, err := git(here, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return errors.New("current directory is not inside a Git repository")
+	}
+	action := args[0]
+	if action == "list" {
+		value, err := git(root, "worktree", "list", "--porcelain")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, value)
+		return nil
+	}
+	if action == "new" {
+		if len(args) < 2 {
+			return errors.New("usage: ai-init wt new <task>")
+		}
+		task := args[1]
+		if strings.ContainsAny(task, "/\\") || task == "." || task == ".." {
+			return errors.New("task name must be a single directory name")
+		}
+		dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
+		if _, err := os.Stat(dest); err == nil {
+			return fmt.Errorf("worktree path already exists: %s", dest)
+		}
+		branch := "codex/" + task
+		if _, err = git(root, "worktree", "add", "-b", branch, dest); err != nil {
+			return err
+		}
+		exclude, err := git(root, "rev-parse", "--git-path", "info/exclude")
+		if err != nil {
+			return err
+		}
+		if !filepath.IsAbs(exclude) {
+			exclude = filepath.Join(root, exclude)
+		}
+		ignore, readErr := os.ReadFile(exclude)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+		if !strings.Contains(string(ignore), ".agent-task.md") {
+			if err = os.MkdirAll(filepath.Dir(exclude), 0755); err != nil {
+				return err
+			}
+			f, openErr := os.OpenFile(exclude, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+			if openErr != nil {
+				return openErr
+			}
+			_, writeErr := f.WriteString("\n# ai-init task-local primer\n.agent-task.md\n")
+			closeErr := f.Close()
+			if writeErr != nil {
+				return writeErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: see repository AGENTS.md\n\nDo not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch)
+		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
+			return fmt.Errorf("worktree created but task primer failed: %w", err)
+		}
+		fmt.Fprintf(w, "Created %s on branch %s\n", dest, branch)
+		return nil
+	}
+	if len(args) < 2 {
+		return fmt.Errorf("%s requires a task name", action)
+	}
+	task := args[1]
+	dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
+	switch action {
+	case "status":
+		value, err := git(dest, "status", "--short", "--branch")
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(w, value)
+		return nil
+	case "sync":
+		status, err := git(dest, "status", "--porcelain")
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return errors.New("worktree has uncommitted changes; commit or stash them before sync")
+		}
+		branch, err := git(root, "branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		if _, err = git(dest, "merge", "--no-edit", branch); err != nil {
+			return fmt.Errorf("sync failed; resolve conflicts in the task worktree: %w", err)
+		}
+		fmt.Fprintf(w, "Synced %s into task worktree\n", branch)
+		return nil
+	case "integrate":
+		return errors.New("transactional integration is not implemented; review and merge the task branch manually")
+	case "cleanup":
+		status, err := git(dest, "status", "--porcelain")
+		if err != nil {
+			return err
+		}
+		if status != "" {
+			return errors.New("refusing cleanup: worktree has uncommitted changes")
+		}
+		branch, err := git(dest, "branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		target, err := git(root, "branch", "--show-current")
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command("git", "merge-base", "--is-ancestor", branch, target)
+		cmd.Dir = root
+		if err = cmd.Run(); err != nil {
+			return errors.New("refusing cleanup because task branch is not integrated")
+		}
+		if _, err = git(root, "worktree", "remove", dest); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "Removed clean worktree %s\n", dest)
+		return nil
+	default:
+		return fmt.Errorf("unknown worktree action %q", action)
+	}
 }
-
-var _ = bufio.NewReader

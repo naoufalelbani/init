@@ -93,3 +93,25 @@ func contains(list []string, v string) bool {
 	}
 	return false
 }
+func TestManagedBlockPreservesUserText(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "AGENTS.md")
+	original := "<!-- ai-init:begin -->\nold\n<!-- ai-init:end -->\n\n# My rules\nKeep this section.\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := writeAgents(root, analyze(root), false, &out); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "# My rules\nKeep this section.") {
+		t.Fatalf("custom text lost: %s", got)
+	}
+	if strings.Contains(string(got), "\\n") {
+		t.Fatal("literal escape sequences in generated instructions")
+	}
+}
