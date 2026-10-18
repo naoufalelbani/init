@@ -1,3 +1,6 @@
 .agent-task.md
 *.ai-init.bak
-.ai-init/
+.ai-init/ports.json
+.ai-init/ports.lock/
+.ai-init/ports.json.tmp-*
+.ai-init/ports.json.replace-*

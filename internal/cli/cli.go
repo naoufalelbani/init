@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,17 +11,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
-	"time"
+
+	agentcfg "github.com/naoufalelbani/init/internal/agents"
+	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
 const version = "0.1.0"
 
 type project struct {
-	Name                                         string
-	Languages, Frameworks, Build, Tests, Sources []string
-	Git                                          bool
+	Name                                                      string
+	Languages, Frameworks, Build, Tests, Sources, EntryPoints []string
+	Git                                                       bool
 }
 
 func Run(args []string, out, errOut io.Writer) error {
@@ -52,6 +56,8 @@ func Run(args []string, out, errOut io.Writer) error {
 		return agents(args[1:], out)
 	case "memory":
 		return memory(args[1:], out)
+	case "ports":
+		return ports(args[1:], out)
 	case "prompt":
 		return prompt(args[1:], out)
 	case "wt":
@@ -66,10 +72,11 @@ func usage(w io.Writer) {
 Usage:
   ai-init setup [--path DIR] [--dry-run] [--with agents,worktrees,memory]
   ai-init analyze [--path DIR]
-  ai-init agents generate|audit|sync|validate [--path DIR] [--dry-run]
+  ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME]
   ai-init memory generate|update [--path DIR]
+  ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
   ai-init wt new|list|status|sync|integrate|cleanup [TASK]
-  ai-init prompt agents|worktrees|audit|config
+  ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
   ai-init doctor
   ai-init version`)
 }
@@ -81,14 +88,56 @@ func target(args []string) (string, []string, error) {
 		return "", nil, e
 	}
 	p, e := filepath.Abs(*path)
-	return p, fs.Args(), e
+	if e != nil {
+		return "", nil, e
+	}
+	if !pathSpecified(args) {
+		p = discoverRoot(p)
+	}
+	return p, fs.Args(), nil
+}
+
+func pathSpecified(args []string) bool {
+	for _, arg := range args {
+		if arg == "--path" || strings.HasPrefix(arg, "--path=") {
+			return true
+		}
+	}
+	return false
+}
+
+func discoverRoot(start string) string {
+	if top, err := git(start, "rev-parse", "--show-toplevel"); err == nil {
+		return top
+	}
+	markers := []string{"go.mod", "Cargo.toml", "pubspec.yaml", "package.json", "pyproject.toml", "requirements.txt", "pom.xml", "build.gradle", "build.gradle.kts", "CMakeLists.txt"}
+	current := start
+	for {
+		entries, err := os.ReadDir(current)
+		if err == nil {
+			names := make(map[string]bool, len(entries))
+			for _, entry := range entries {
+				names[entry.Name()] = true
+			}
+			for _, marker := range markers {
+				if names[marker] {
+					return current
+				}
+			}
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return start
+		}
+		current = parent
+	}
 }
 func analyze(root string) project {
 	p := project{Name: filepath.Base(root)}
 	if _, e := os.Stat(filepath.Join(root, ".git")); e == nil {
 		p.Git = true
 	}
-	checks := map[string]string{"go.mod": "Go", "Cargo.toml": "Rust", "pubspec.yaml": "Dart / Flutter", "pyproject.toml": "Python", "requirements.txt": "Python", "package.json": "JavaScript / TypeScript", "pom.xml": "Java", "build.gradle": "Java", "build.gradle.kts": "Kotlin / Java", "*.csproj": "C# / .NET", "CMakeLists.txt": "C / C++ / Qt"}
+	checks := map[string]string{"go.mod": "Go", "Cargo.toml": "Rust", "pubspec.yaml": "Dart", "pyproject.toml": "Python", "requirements.txt": "Python", "package.json": "JavaScript", "pom.xml": "Java", "build.gradle": "Java", "build.gradle.kts": "Kotlin / Java", "*.csproj": "C# / .NET", "CMakeLists.txt": "C / C++"}
 	entries, _ := os.ReadDir(root)
 	names := map[string]bool{}
 	for _, x := range entries {
@@ -109,13 +158,112 @@ func analyze(root string) project {
 	}
 	if names["package.json"] {
 		b, _ := os.ReadFile(filepath.Join(root, "package.json"))
-		s := string(b)
-		for _, x := range []string{"react", "vue", "vite", "next", "express"} {
-			if strings.Contains(s, "\""+x+"\"") {
-				p.Frameworks = append(p.Frameworks, x)
+		var manifest struct {
+			Scripts         map[string]string `json:"scripts"`
+			Dependencies    map[string]string `json:"dependencies"`
+			DevDependencies map[string]string `json:"devDependencies"`
+		}
+		_ = json.Unmarshal(b, &manifest)
+		dependencies := map[string]bool{}
+		for name := range manifest.Dependencies {
+			dependencies[name] = true
+		}
+		for name := range manifest.DevDependencies {
+			dependencies[name] = true
+		}
+		for _, name := range []string{"react", "vue", "vite", "next", "express", "@angular/core", "svelte", "@sveltejs/kit", "electron", "nuxt", "gatsby"} {
+			if dependencies[name] {
+				p.Frameworks = append(p.Frameworks, name)
 			}
 		}
-		p.Build = append(p.Build, "package scripts (inspect package.json)")
+		p.Frameworks = append(p.Frameworks, "Node.js")
+		manager := "npm"
+		if names["pnpm-lock.yaml"] {
+			manager = "pnpm"
+		} else if names["yarn.lock"] {
+			manager = "yarn"
+		} else if names["bun.lockb"] || names["bun.lock"] {
+			manager = "bun"
+		}
+		if names["tsconfig.json"] {
+			p.Languages = append(p.Languages, "TypeScript")
+		}
+		if len(manifest.Scripts) > 0 {
+			p.Build = append(p.Build, "inspect package.json scripts")
+			if _, ok := manifest.Scripts["build"]; ok {
+				if manager == "npm" {
+					p.Build = append(p.Build, "npm run build")
+				} else {
+					p.Build = append(p.Build, manager+" run build")
+				}
+			}
+			if _, ok := manifest.Scripts["test"]; ok {
+				if manager == "pnpm" {
+					p.Tests = append(p.Tests, "pnpm test")
+				} else if manager == "yarn" {
+					p.Tests = append(p.Tests, "yarn test")
+				} else if manager == "bun" {
+					p.Tests = append(p.Tests, "bun run test")
+				} else {
+					p.Tests = append(p.Tests, "npm test")
+				}
+			}
+		}
+	}
+	if names["pubspec.yaml"] {
+		b, _ := os.ReadFile(filepath.Join(root, "pubspec.yaml"))
+		if bytes.Contains(b, []byte("flutter:")) {
+			p.Frameworks = append(p.Frameworks, "Flutter")
+			if names["test"] {
+				p.Tests = append(p.Tests, "flutter test")
+			}
+		} else if names["test"] {
+			p.Tests = append(p.Tests, "dart test")
+		}
+	}
+	if names["Cargo.toml"] {
+		data, _ := os.ReadFile(filepath.Join(root, "Cargo.toml"))
+		text := strings.ToLower(string(data))
+		for _, name := range []string{"tokio", "axum", "actix-web", "serde", "tauri"} {
+			if strings.Contains(text, name) {
+				p.Frameworks = append(p.Frameworks, name)
+			}
+		}
+	}
+	if names["pyproject.toml"] || names["requirements.txt"] {
+		name := "pyproject.toml"
+		if !names[name] {
+			name = "requirements.txt"
+		}
+		data, _ := os.ReadFile(filepath.Join(root, name))
+		text := strings.ToLower(string(data))
+		for _, framework := range []string{"django", "fastapi", "flask", "pytest"} {
+			if strings.Contains(text, framework) {
+				if framework == "pytest" {
+					p.Tests = append(p.Tests, "pytest")
+				} else {
+					p.Frameworks = append(p.Frameworks, framework)
+				}
+			}
+		}
+	}
+	if names["pom.xml"] || names["build.gradle"] || names["build.gradle.kts"] {
+		name := "pom.xml"
+		if !names[name] {
+			if names["build.gradle"] {
+				name = "build.gradle"
+			} else {
+				name = "build.gradle.kts"
+			}
+		}
+		data, _ := os.ReadFile(filepath.Join(root, name))
+		text := strings.ToLower(string(data))
+		if strings.Contains(text, "spring-boot") || strings.Contains(text, "springframework") {
+			p.Frameworks = append(p.Frameworks, "Spring")
+		}
+	}
+	if names["tsconfig.json"] && !names["package.json"] {
+		p.Languages = append(p.Languages, "TypeScript")
 	}
 	if names["go.mod"] {
 		p.Build = append(p.Build, "go build ./...")
@@ -127,15 +275,82 @@ func analyze(root string) project {
 	}
 	if names["pyproject.toml"] {
 		p.Build = append(p.Build, "unknown (pyproject.toml detected)")
+		if names["pytest.ini"] || names["tox.ini"] {
+			p.Tests = append(p.Tests, "pytest")
+		}
+	}
+	if names["pom.xml"] {
+		if names["mvnw"] {
+			p.Build = append(p.Build, "./mvnw package")
+			p.Tests = append(p.Tests, "./mvnw test")
+		} else if names["mvnw.cmd"] {
+			p.Build = append(p.Build, "mvnw.cmd package")
+			p.Tests = append(p.Tests, "mvnw.cmd test")
+		} else {
+			p.Build = append(p.Build, "mvn package")
+			p.Tests = append(p.Tests, "mvn test")
+		}
+	}
+	if names["build.gradle"] || names["build.gradle.kts"] {
+		if names["gradlew"] {
+			p.Tests = append(p.Tests, "./gradlew test")
+		} else if names["gradlew.bat"] {
+			p.Tests = append(p.Tests, "gradlew.bat test")
+		} else {
+			p.Tests = append(p.Tests, "gradle test")
+		}
+	}
+	if names["CMakeLists.txt"] {
+		b, _ := os.ReadFile(filepath.Join(root, "CMakeLists.txt"))
+		if bytes.Contains(b, []byte("Qt5")) || bytes.Contains(b, []byte("Qt6")) {
+			p.Frameworks = append(p.Frameworks, "Qt")
+		}
+	}
+	for name := range names {
+		if strings.HasSuffix(name, ".csproj") {
+			p.Tests = append(p.Tests, "dotnet test")
+		}
+	}
+	if names["pytest.ini"] || names["tox.ini"] {
+		p.Tests = append(p.Tests, "pytest")
+	}
+	if names["requirements.txt"] {
+		b, _ := os.ReadFile(filepath.Join(root, "requirements.txt"))
+		if bytes.Contains(bytes.ToLower(b), []byte("pytest")) {
+			p.Tests = append(p.Tests, "pytest")
+		}
+	}
+	for _, candidate := range []string{"main.go", "main.py", "main.rs", "main.cpp", "index.js", "index.ts", "Program.cs", "src/main.go", "src/main.py", "src/main.rs", "src/main.dart", "src/main.js", "src/main.ts", "src/main.tsx", "src/index.js", "src/index.ts", "src/App.tsx", "lib/main.dart", "src/Program.cs", "src/main.cpp"} {
+		if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
+			p.EntryPoints = append(p.EntryPoints, candidate)
+		}
 	}
 	for _, d := range []string{"src", "app", "cmd", "lib", "internal", "pkg", "test", "tests"} {
 		if names[d] {
 			p.Sources = append(p.Sources, d)
 		}
 	}
+	p.Languages = uniqueStrings(p.Languages)
+	p.Frameworks = uniqueStrings(p.Frameworks)
+	p.Build = uniqueStrings(p.Build)
+	p.Tests = uniqueStrings(p.Tests)
 	sort.Strings(p.Languages)
 	sort.Strings(p.Frameworks)
+	sort.Strings(p.Sources)
+	sort.Strings(p.EntryPoints)
 	return p
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
 }
 func printProject(w io.Writer, root string, p project) {
 	fmt.Fprintf(w, "Project: %s\nPath: %s\nStack: %s\nGit: %t\n", p.Name, root, joinOrUnknown(p.Languages), p.Git)
@@ -143,6 +358,7 @@ func printProject(w io.Writer, root string, p project) {
 		fmt.Fprintf(w, "Frameworks: %s\n", strings.Join(p.Frameworks, ", "))
 	}
 	fmt.Fprintf(w, "Source directories: %s\n", joinOrUnknown(p.Sources))
+	fmt.Fprintf(w, "Entry points: %s\n", joinOrUnknown(p.EntryPoints))
 	fmt.Fprintf(w, "Build hints: %s\n", joinOrUnknown(p.Build))
 	fmt.Fprintf(w, "Test hints: %s\n", joinOrUnknown(p.Tests))
 }
@@ -158,6 +374,7 @@ func setup(args []string, w io.Writer) error {
 	path := fs.String("path", ".", "project path")
 	dry := fs.Bool("dry-run", false, "preview without writing")
 	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory")
+	adapters := fs.String("adapters", "", "comma-separated agent adapters; empty detects existing configuration")
 	verbose := fs.Bool("verbose", false, "show details")
 	if e := fs.Parse(args); e != nil {
 		return e
@@ -165,6 +382,9 @@ func setup(args []string, w io.Writer) error {
 	root, e := filepath.Abs(*path)
 	if e != nil {
 		return e
+	}
+	if !pathSpecified(args) {
+		root = discoverRoot(root)
 	}
 	p := analyze(root)
 	printProject(w, root, p)
@@ -176,10 +396,27 @@ func setup(args []string, w io.Writer) error {
 		}
 		selected[name] = true
 	}
+	for _, adapter := range splitList(*adapters) {
+		if !slices.Contains(agentcfg.Names(), strings.ToLower(adapter)) {
+			return fmt.Errorf("unknown agent adapter %q; run 'ai-init agents list'", adapter)
+		}
+	}
+	if len(splitList(*adapters)) > 0 && !selected["agents"] {
+		return errors.New("--adapters requires the agents component in --with")
+	}
 	fmt.Fprintln(w, "\nSetup:")
 	if selected["agents"] {
 		if e := writeAgents(root, p, *dry, w); e != nil {
 			return e
+		}
+		var adapterReport bytes.Buffer
+		if e := agentcfg.Configure(root, splitList(*adapters), *dry, &adapterReport); e != nil {
+			return e
+		}
+		if adapterReport.Len() == 0 {
+			fmt.Fprintln(w, "  adapters: none detected; use --adapters to configure one explicitly")
+		} else {
+			_, _ = w.Write(adapterReport.Bytes())
 		}
 	}
 	if selected["memory"] {
@@ -197,6 +434,20 @@ func setup(args []string, w io.Writer) error {
 	}
 	fmt.Fprintln(w, "Validation: completed for generated files")
 	return nil
+}
+
+func splitList(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 func writeFileSafe(path, content string, dry bool, w io.Writer) error {
 	old, e := os.ReadFile(path)
@@ -236,30 +487,18 @@ func writeFileSafe(path, content string, dry bool, w io.Writer) error {
 	return nil
 }
 func agentsTemplate(p project) string {
-	return fmt.Sprintf(`# Project instructions
-
-## Verified project facts
-- Project: %s
-- Detected languages: %s
-- Detected frameworks: %s
-- Source directories: %s
-- Git repository: %t
-
-## Development rules
-- Respect the existing architecture, framework conventions, and public behavior. Do not rewrite the application or change its language without explicit direction.
-- Inspect relevant code, callers, tests, and repository instructions before editing. Search for existing functionality before adding another implementation.
-- Keep changes focused, understandable, and compatible with established naming and formatting.
-- Handle errors explicitly. Do not add silent failures, dead code, temporary production stubs, or unnecessary dependencies.
-- Preserve user changes and unrelated files. Never use destructive Git operations or overwrite uncommitted work.
-- Do not expose credentials, tokens, private keys, or other secrets in source, logs, or generated context.
-- Verify changes with commands supported by this repository. Detected test hints: %s. Treat these as hints and confirm project-specific scripts before running.
-- Report what changed, what verification ran, and any unresolved issues honestly.
-
-## Agent workspace safety
-- Work only in the assigned repository or Git worktree. Do not edit another agent's worktree.
-- Keep task-local notes out of commits unless the user asks to track them.
-- Integrate parallel work only after reviewing the combined changes.
-`, p.Name, joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), p.Git, joinOrUnknown(p.Tests))
+	template, _ := promptFiles.ReadFile("templates/AGENTS.template.md")
+	replacer := strings.NewReplacer(
+		"{{PROJECT_NAME}}", p.Name,
+		"{{LANGUAGES}}", joinOrUnknown(p.Languages),
+		"{{FRAMEWORKS}}", joinOrUnknown(p.Frameworks),
+		"{{SOURCES}}", joinOrUnknown(p.Sources),
+		"{{ENTRY_POINTS}}", joinOrUnknown(p.EntryPoints),
+		"{{GIT}}", fmt.Sprint(p.Git),
+		"{{BUILD_COMMANDS}}", joinOrUnknown(p.Build),
+		"{{TEST_COMMANDS}}", joinOrUnknown(p.Tests),
+	)
+	return replacer.Replace(string(template))
 }
 func writeAgents(root string, p project, dry bool, w io.Writer) error {
 	path := filepath.Join(root, "AGENTS.md")
@@ -286,25 +525,126 @@ func writeAgents(root string, p project, dry bool, w io.Writer) error {
 	return writeFileSafe(path, start+"\n"+agentsTemplate(p)+"\n"+end+"\n", dry, w)
 }
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
-	content := fmt.Sprintf("# Project map\n\nGenerated from repository files on %s. Verify details against source.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Build hints: %s\n- Test hints: %s\n", time.Now().Format("2006-01-02"), p.Name, joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.Build), joinOrUnknown(p.Tests))
-	return writeFileSafe(filepath.Join(root, ".ai", "PROJECT_MAP.md"), content, dry, w)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	var configs, indexers []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".prettierrc") || strings.HasPrefix(name, ".eslintrc") || strings.HasPrefix(name, "biome.") || slices.Contains([]string{".editorconfig", ".gitattributes", ".golangci.yml", ".golangci.yaml", "rustfmt.toml", ".rustfmt.toml", "pyproject.toml", "ruff.toml", ".clang-format", ".clang-tidy"}, name) {
+			configs = append(configs, name)
+		}
+		if slices.Contains([]string{".serena", ".graphify", "graphify.yml", "graphify.json", "mcp.json", ".mcp.json"}, name) {
+			indexers = append(indexers, name)
+		}
+	}
+	sort.Strings(configs)
+	sort.Strings(indexers)
+	branch, head := "unknown", "unknown"
+	if p.Git {
+		if value, e := git(root, "branch", "--show-current"); e == nil && value != "" {
+			branch = value
+		}
+		if value, e := git(root, "rev-parse", "--short", "HEAD"); e == nil {
+			head = value
+		}
+	}
+	items := map[string]string{
+		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from root manifests and directories. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n", p.Name, joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.EntryPoints), joinOrUnknown(p.Build), joinOrUnknown(p.Tests)),
+		"ARCHITECTURE.md":  fmt.Sprintf("# Architecture context\n\n## Verified repository facts\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n\n## Boundaries\nThe deterministic scan does not infer UI/backend or module ownership boundaries. Treat those as unknown until confirmed in source and project documentation.\n", joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.EntryPoints), joinOrUnknown(p.Build), joinOrUnknown(p.Tests)),
+		"CONVENTIONS.md":   fmt.Sprintf("# Detected conventions\n\nConfiguration files found at the repository root: %s. Their contents define the authoritative formatting and lint rules. No additional naming or style conventions are inferred here.\n", joinOrUnknown(configs)),
+		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n", p.Git, branch, head, joinOrUnknown(indexers)),
+		"DECISIONS.md":     "# Project decisions\n\nThe deterministic analyzer does not infer design decisions. Record manually approved decisions below.\n",
+	}
+	for _, name := range []string{"PROJECT_MAP.md", "ARCHITECTURE.md", "CONVENTIONS.md", "CURRENT_STATE.md", "DECISIONS.md"} {
+		if err := writeManagedContext(filepath.Join(root, ".ai", name), items[name], dry, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeManagedContext(path, body string, dry bool, w io.Writer) error {
+	const begin, end = "<!-- ai-init:begin -->", "<!-- ai-init:end -->"
+	old, err := os.ReadFile(path)
+	if err == nil {
+		text := string(old)
+		i := strings.Index(text, begin)
+		if i < 0 {
+			fmt.Fprintf(w, "  preserved %s (manual context has no ai-init markers)\n", path)
+			return nil
+		}
+		relative := strings.Index(text[i:], end)
+		if relative < 0 {
+			return fmt.Errorf("managed context block in %s is incomplete; preserving file", path)
+		}
+		j := i + relative + len(end)
+		updated := text[:i] + begin + "\n" + strings.TrimSpace(body) + "\n" + end + text[j:]
+		return writeFileSafe(path, updated, dry, w)
+	}
+	if !os.IsNotExist(err) {
+		return err
+	}
+	return writeFileSafe(path, begin+"\n"+strings.TrimSpace(body)+"\n"+end+"\n", dry, w)
 }
 func installWorktreeGuide(root string, dry bool, w io.Writer) error {
-	content := "# Worktrees`n`nUse `ai-init wt new <task>` to create an isolated task branch. Review changes and run validation before integration. Cleanup refuses to remove unmerged work.`n"
+	content := "# Worktrees\n\nUse `ai-init wt new <task>` to create an isolated task branch. Review changes and run validation before integration. Cleanup refuses to remove unmerged work.\n"
 	return writeFileSafe(filepath.Join(root, ".ai-init", "WORKTREES.md"), content, dry, w)
 }
 func agents(args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ai-init agents generate|audit|sync|validate")
+		return errors.New("usage: ai-init agents generate|audit|sync|validate|configure|list")
+	}
+	if args[0] == "list" {
+		for _, adapter := range agentcfg.List() {
+			fmt.Fprintf(w, "%-12s %s\n", adapter.Name, adapter.Description)
+		}
+		return nil
+	}
+	if args[0] == "configure" {
+		fs := flag.NewFlagSet("agents configure", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", ".", "project path")
+		names := fs.String("adapter", "", "comma-separated adapters to configure")
+		dry := fs.Bool("dry-run", false, "preview without writing")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		root, err := filepath.Abs(*path)
+		if err != nil {
+			return err
+		}
+		if !pathSpecified(args[1:]) {
+			root = discoverRoot(root)
+		}
+		if _, err = os.Stat(filepath.Join(root, "AGENTS.md")); err != nil {
+			return fmt.Errorf("generate canonical AGENTS.md first: %w", err)
+		}
+		return agentcfg.Configure(root, splitList(*names), *dry, w)
+	}
+	if args[0] == "generate" || args[0] == "sync" {
+		fs := flag.NewFlagSet("agents "+args[0], flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", ".", "project path")
+		dry := fs.Bool("dry-run", false, "preview without writing")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		root, err := filepath.Abs(*path)
+		if err != nil {
+			return err
+		}
+		if !pathSpecified(args[1:]) {
+			root = discoverRoot(root)
+		}
+		return writeAgents(root, analyze(root), *dry, w)
 	}
 	root, _, e := target(args[1:])
 	if e != nil {
 		return e
 	}
-	p := analyze(root)
 	switch args[0] {
-	case "generate", "sync":
-		return writeAgents(root, p, false, w)
 	case "audit", "validate":
 		b, e := os.ReadFile(filepath.Join(root, "AGENTS.md"))
 		if e != nil {
@@ -320,23 +660,145 @@ func memory(args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ai-init memory generate|update")
 	}
-	root, _, e := target(args[1:])
-	if e != nil {
-		return e
+	if args[0] != "generate" && args[0] != "update" {
+		return fmt.Errorf("unknown memory action %q", args[0])
 	}
-	return writeMemory(root, analyze(root), false, w)
+	fs := flag.NewFlagSet("memory", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	path := fs.String("path", ".", "project path")
+	dry := fs.Bool("dry-run", false, "preview without writing")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(*path)
+	if err != nil {
+		return err
+	}
+	if !pathSpecified(args[1:]) {
+		root = discoverRoot(root)
+	}
+	return writeMemory(root, analyze(root), *dry, w)
+}
+
+func ports(args []string, w io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: ai-init ports allocate <task> <service>|list|release <task>")
+	}
+	path := "."
+	dry := false
+	var positional []string
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--dry-run" {
+			dry = true
+		} else if args[i] == "--path" {
+			if i+1 >= len(args) {
+				return errors.New("--path requires a directory")
+			}
+			i++
+			path = args[i]
+		} else if strings.HasPrefix(args[i], "--path=") {
+			path = strings.TrimPrefix(args[i], "--path=")
+		} else {
+			positional = append(positional, args[i])
+		}
+	}
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if !pathSpecified(args[1:]) {
+		root = discoverRoot(root)
+	}
+	switch args[0] {
+	case "list":
+		registry, err := portalloc.List(root)
+		if err != nil {
+			return err
+		}
+		for _, task := range portalloc.SortedTasks(registry) {
+			for _, service := range portalloc.SortedServices(registry, task) {
+				fmt.Fprintf(w, "%s %s %d\n", task, service, registry.Allocations[task][service])
+			}
+		}
+		return nil
+	case "allocate":
+		if len(positional) != 2 {
+			return errors.New("usage: ai-init ports allocate <task> <service> [--path DIR]")
+		}
+		var port int
+		if dry {
+			port, err = portalloc.Preview(root, positional[0], positional[1])
+		} else {
+			port, err = portalloc.Allocate(root, positional[0], positional[1])
+		}
+		if err != nil {
+			return err
+		}
+		if dry {
+			fmt.Fprintf(w, "Would allocate %s %s %d\n", positional[0], positional[1], port)
+			return nil
+		}
+		fmt.Fprintf(w, "%s %s %d\n", positional[0], positional[1], port)
+		return nil
+	case "release":
+		if len(positional) != 1 {
+			return errors.New("usage: ai-init ports release <task> [--path DIR]")
+		}
+		if dry {
+			fmt.Fprintf(w, "Would release port records for %s\n", positional[0])
+			return nil
+		}
+		return portalloc.Release(root, positional[0])
+	default:
+		return fmt.Errorf("unknown ports action %q", args[0])
+	}
 }
 func prompt(args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("choose agents, worktrees, audit, or config")
 	}
-	file := map[string]string{"agents": "generate-agents.md", "worktrees": "setup-worktrees.md", "audit": "audit-project.md", "config": "improve-existing-config.md"}[args[0]]
+	topic := args[0]
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	output := fs.String("output", "", "export prompt to a new file")
+	dry := fs.Bool("dry-run", false, "preview export without writing")
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	file := map[string]string{"agents": "generate-agents.md", "worktrees": "setup-worktrees.md", "audit": "audit-project.md", "config": "improve-existing-config.md"}[topic]
 	if file == "" {
 		return fmt.Errorf("unknown prompt %q", args[0])
 	}
-	b, e := os.ReadFile(filepath.Join("prompts", file))
+	b, e := promptFiles.ReadFile("prompts/" + file)
 	if e != nil {
-		return fmt.Errorf("prompt not found at %s: %w", filepath.Join("prompts", file), e)
+		return e
+	}
+	if *output != "" {
+		path, err := filepath.Abs(*output)
+		if err != nil {
+			return err
+		}
+		if *dry {
+			fmt.Fprintf(w, "Would export %s to %s\n", topic, path)
+			return nil
+		}
+		if err = os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return err
+		}
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			return fmt.Errorf("export prompt without overwriting existing files: %w", err)
+		}
+		if _, err = f.Write(b); err != nil {
+			_ = f.Close()
+			_ = os.Remove(path)
+			return err
+		}
+		if err = f.Close(); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "Exported %s to %s\n", topic, path)
+		return nil
 	}
 	_, e = w.Write(b)
 	return e
@@ -364,6 +826,166 @@ func git(root string, args ...string) (string, error) {
 	}
 	return strings.TrimSpace(string(output)), nil
 }
+
+func validTaskName(task string) bool {
+	return task != "" && task != "." && task != ".." && filepath.Base(task) == task && !strings.ContainsAny(task, "/\\")
+}
+
+func integrate(root, sourceWorktree, task string, out io.Writer, dry bool) error {
+	clean, err := git(root, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if clean != "" {
+		return errors.New("target worktree has uncommitted changes; commit or stash them before integration")
+	}
+	clean, err = git(sourceWorktree, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if clean != "" {
+		return errors.New("task worktree has uncommitted changes; commit or stash them before integration")
+	}
+	taskBranch, err := git(sourceWorktree, "branch", "--show-current")
+	if err != nil {
+		return err
+	}
+	if taskBranch == "" {
+		return errors.New("task worktree is detached; integration requires its task branch")
+	}
+	if taskBranch != "agent/"+task {
+		return fmt.Errorf("task %q resolves to branch %q; expected agent/%s", task, taskBranch, task)
+	}
+	targetBranch, err := git(root, "branch", "--show-current")
+	if err != nil {
+		return err
+	}
+	if targetBranch == "" {
+		return errors.New("target worktree is detached; integration requires a checked-out target branch")
+	}
+	gitPath, err := git(root, "rev-parse", "--git-path", "ai-init-integration.lock")
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(gitPath) {
+		gitPath = filepath.Join(root, gitPath)
+	}
+	if err = os.Mkdir(gitPath, 0700); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("another integration holds %s; if it is stale, inspect and remove the lock directory", gitPath)
+		}
+		return fmt.Errorf("acquire integration lock: %w", err)
+	}
+	defer os.Remove(gitPath)
+	targetHead, err := git(root, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	taskHead, err := git(sourceWorktree, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(root)
+	temp := filepath.Join(parent, fmt.Sprintf(".ai-init-integrate-%s-%d", filepath.Base(root), os.Getpid()))
+	if _, err = os.Lstat(temp); err == nil {
+		return fmt.Errorf("disposable integration path already exists: %s", temp)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err = git(root, "worktree", "add", "--detach", temp, targetHead); err != nil {
+		return fmt.Errorf("create disposable integration worktree: %w", err)
+	}
+	registered := true
+	defer func() {
+		if !registered {
+			return
+		}
+		if _, e := git(temp, "merge", "--abort"); e != nil { /* no merge in progress */
+		}
+		if _, e := git(root, "worktree", "remove", temp); e != nil {
+			fmt.Fprintf(out, "Recovery needed: disposable worktree remains at %s (%v)\n", temp, e)
+		}
+	}()
+	if _, err = git(temp, "merge", "--no-edit", taskHead); err != nil {
+		return fmt.Errorf("integration conflict or merge failure in disposable worktree %s; target and task branches are unchanged: %w", temp, err)
+	}
+	p := analyze(temp)
+	if len(p.Tests) == 0 || p.Tests[0] == "unknown" {
+		return errors.New("no verified test command was detected; target was not changed")
+	}
+	for _, test := range p.Tests {
+		if test == "unknown (pyproject.toml detected)" {
+			continue
+		}
+		parts := strings.Fields(test)
+		if len(parts) == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "Running combined-result validation: %s\n", test)
+		cmd := exec.Command(parts[0], parts[1:]...)
+		cmd.Dir = temp
+		cmd.Stdout = out
+		cmd.Stderr = out
+		if err = cmd.Run(); err != nil {
+			return fmt.Errorf("combined-result validation failed in disposable worktree; target was not changed: %w", err)
+		}
+	}
+	current, err := git(root, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if current != targetHead {
+		return errors.New("target branch changed during validation; integration cancelled")
+	}
+	current, err = git(root, "branch", "--show-current")
+	if err != nil {
+		return err
+	}
+	if current != targetBranch {
+		return errors.New("target checkout changed branches during validation; integration cancelled")
+	}
+	current, err = git(sourceWorktree, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	if current != taskHead {
+		return errors.New("task branch changed during validation; integration cancelled")
+	}
+	current, err = git(sourceWorktree, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if current != "" {
+		return errors.New("task worktree became dirty during validation; integration cancelled")
+	}
+	clean, err = git(root, "status", "--porcelain")
+	if err != nil {
+		return err
+	}
+	if clean != "" {
+		return errors.New("target worktree became dirty during validation; integration cancelled")
+	}
+	if dry {
+		if _, err = git(root, "worktree", "remove", temp); err != nil {
+			return fmt.Errorf("validation passed, but disposable worktree cleanup failed at %s: %w", temp, err)
+		}
+		registered = false
+		fmt.Fprintf(out, "Validation passed; would integrate %s into %s\n", taskBranch, targetBranch)
+		return nil
+	}
+	if _, err = git(root, "merge", "--ff-only", taskHead); err != nil {
+		return fmt.Errorf("validated result could not be fast-forwarded; task and target branches remain available: %w", err)
+	}
+	if _, err = git(root, "worktree", "remove", temp); err != nil {
+		return fmt.Errorf("integration succeeded, but disposable worktree cleanup failed at %s: %w", temp, err)
+	}
+	registered = false
+	fmt.Fprintf(out, "Integrated %s into %s after combined-result validation\n", taskBranch, targetBranch)
+	if err = portalloc.Release(root, task); err != nil {
+		fmt.Fprintf(out, "Could not release local port records for %s: %v\n", task, err)
+	}
+	return nil
+}
 func worktrees(args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ai-init wt new|list|status|sync|integrate|cleanup [task]")
@@ -385,21 +1007,121 @@ func worktrees(args []string, w io.Writer) error {
 		fmt.Fprintln(w, value)
 		return nil
 	}
+	if action == "status" && len(args) == 1 {
+		list, listErr := git(root, "worktree", "list", "--porcelain")
+		if listErr != nil {
+			return listErr
+		}
+		for _, block := range strings.Split(list, "\n\n") {
+			var worktree string
+			for _, line := range strings.Split(block, "\n") {
+				if strings.HasPrefix(line, "worktree ") {
+					worktree = strings.TrimPrefix(line, "worktree ")
+					break
+				}
+			}
+			if worktree == "" {
+				continue
+			}
+			state, statusErr := git(worktree, "status", "--short", "--branch")
+			if statusErr != nil {
+				return statusErr
+			}
+			fmt.Fprintf(w, "%s\n%s\n", worktree, state)
+		}
+		return nil
+	}
 	if action == "new" {
 		if len(args) < 2 {
 			return errors.New("usage: ai-init wt new <task>")
 		}
 		task := args[1]
-		if strings.ContainsAny(task, "/\\") || task == "." || task == ".." {
+		if !validTaskName(task) {
 			return errors.New("task name must be a single directory name")
 		}
 		dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
 		if _, err := os.Stat(dest); err == nil {
 			return fmt.Errorf("worktree path already exists: %s", dest)
 		}
-		branch := "codex/" + task
-		if _, err = git(root, "worktree", "add", "-b", branch, dest); err != nil {
+		ide := ""
+		dry := false
+		var services []string
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--ide":
+				if i+1 >= len(args) {
+					return errors.New("--ide requires an adapter name")
+				}
+				i++
+				ide = args[i]
+			case "--port":
+				if i+1 >= len(args) {
+					return errors.New("--port requires a service name")
+				}
+				i++
+				services = append(services, args[i])
+			case "--dry-run":
+				dry = true
+			default:
+				return fmt.Errorf("unknown wt new option %q", args[i])
+			}
+		}
+		if ide != "" && !slices.Contains(agentcfg.Names(), strings.ToLower(ide)) {
+			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
+		}
+		if dry {
+			branch := "agent/" + task
+			if existing, _ := git(root, "branch", "--list", branch); existing != "" {
+				return fmt.Errorf("branch already exists: %s", branch)
+			}
+			for _, service := range services {
+				port, previewErr := portalloc.Preview(root, task, service)
+				if previewErr != nil {
+					return previewErr
+				}
+				fmt.Fprintf(w, "Would allocate %s port %d\n", service, port)
+			}
+			fmt.Fprintf(w, "Would create worktree %s on branch %s\n", dest, branch)
+			if ide != "" {
+				fmt.Fprintf(w, "Would configure %s instructions; IDE launch is not configured\n", ide)
+			}
+			return nil
+		}
+		registryBefore, err := portalloc.List(root)
+		if err != nil {
 			return err
+		}
+		priorAllocations := registryBefore.Allocations[task]
+		allocated := map[string]int{}
+		var newlyAllocated []string
+		for _, service := range services {
+			port, allocErr := portalloc.Allocate(root, task, service)
+			if allocErr != nil {
+				for _, created := range newlyAllocated {
+					_ = portalloc.ReleaseService(root, task, created)
+				}
+				return allocErr
+			}
+			allocated[service] = port
+			if priorAllocations[service] == 0 {
+				newlyAllocated = append(newlyAllocated, service)
+			}
+		}
+		branch := "agent/" + task
+		if _, err = git(root, "worktree", "add", "-b", branch, dest); err != nil {
+			for _, created := range newlyAllocated {
+				_ = portalloc.ReleaseService(root, task, created)
+			}
+			return err
+		}
+		if ide != "" {
+			if err = writeAgents(dest, analyze(dest), false, w); err != nil {
+				return fmt.Errorf("worktree created but canonical instructions could not be prepared: %w", err)
+			}
+			if err = agentcfg.Configure(dest, []string{ide}, false, w); err != nil {
+				return fmt.Errorf("worktree created but adapter setup failed: %w", err)
+			}
+			fmt.Fprintln(w, "IDE launch is not configured; open the workspace path above in the selected tool.")
 		}
 		exclude, err := git(root, "rev-parse", "--git-path", "info/exclude")
 		if err != nil {
@@ -429,7 +1151,16 @@ func worktrees(args []string, w io.Writer) error {
 				return closeErr
 			}
 		}
-		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: see repository AGENTS.md\n\nDo not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch)
+		p := analyze(dest)
+		var portInfo strings.Builder
+		for service, port := range allocated {
+			variable := strings.ToUpper(strings.ReplaceAll(service, "-", "_"))
+			fmt.Fprintf(&portInfo, "- %s: %d (set AI_INIT_PORT_%s in the service environment)\n", service, port, variable)
+		}
+		if portInfo.Len() == 0 {
+			portInfo.WriteString("- None allocated; use `ai-init wt new <task> --port <service>` when a project needs a dedicated port.\n")
+		}
+		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: `AGENTS.md`\n- Architecture references: `README.md` and existing `docs/` files when present\n- Verification hints: %s\n\n## Port allocations\n%s\nDo not copy `.env` files or secrets. Do not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch, joinOrUnknown(p.Tests), portInfo.String())
 		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
 			return fmt.Errorf("worktree created but task primer failed: %w", err)
 		}
@@ -440,6 +1171,9 @@ func worktrees(args []string, w io.Writer) error {
 		return fmt.Errorf("%s requires a task name", action)
 	}
 	task := args[1]
+	if !validTaskName(task) {
+		return errors.New("task name must be a single directory name")
+	}
 	dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
 	switch action {
 	case "status":
@@ -467,8 +1201,24 @@ func worktrees(args []string, w io.Writer) error {
 		fmt.Fprintf(w, "Synced %s into task worktree\n", branch)
 		return nil
 	case "integrate":
-		return errors.New("transactional integration is not implemented; review and merge the task branch manually")
+		dry := false
+		for _, option := range args[2:] {
+			if option == "--dry-run" {
+				dry = true
+			} else {
+				return fmt.Errorf("unknown wt integrate option %q", option)
+			}
+		}
+		return integrate(root, dest, task, w, dry)
 	case "cleanup":
+		dry := false
+		for _, option := range args[2:] {
+			if option == "--dry-run" {
+				dry = true
+			} else {
+				return fmt.Errorf("unknown wt cleanup option %q", option)
+			}
+		}
 		status, err := git(dest, "status", "--porcelain")
 		if err != nil {
 			return err
@@ -489,8 +1239,15 @@ func worktrees(args []string, w io.Writer) error {
 		if err = cmd.Run(); err != nil {
 			return errors.New("refusing cleanup because task branch is not integrated")
 		}
+		if dry {
+			fmt.Fprintf(w, "Would remove clean, integrated worktree %s\n", dest)
+			return nil
+		}
 		if _, err = git(root, "worktree", "remove", dest); err != nil {
 			return err
+		}
+		if err = portalloc.Release(root, task); err != nil {
+			return fmt.Errorf("worktree removed but port records could not be released: %w", err)
 		}
 		fmt.Fprintf(w, "Removed clean worktree %s\n", dest)
 		return nil

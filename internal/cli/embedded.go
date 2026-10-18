@@ -2,5 +2,5 @@ package cli
 
 import "embed"
 
-//go:embed prompts/*.md
+//go:embed prompts/*.md templates/*.md
 var promptFiles embed.FS
