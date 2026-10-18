@@ -127,3 +127,39 @@ func TestConfigureCursorRefreshPreservesFilePreambleAndCustomTail(t *testing.T) 
 		t.Fatalf("custom preamble lost: %s", refreshed)
 	}
 }
+
+func TestLaunchCommandDocumentsSupportedInteractiveAdapters(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		args []string
+	}{
+		{name: "cursor", cmd: "cursor", args: []string{".", "--classic"}},
+		{name: "codex", cmd: "codex"},
+		{name: "claude", cmd: "claude"},
+		{name: "opencode", cmd: "opencode", args: []string{"."}},
+		{name: "aider", cmd: "aider"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, args, err := LaunchCommand(tt.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cmd != tt.cmd || strings.Join(args, "\x00") != strings.Join(tt.args, "\x00") {
+				t.Fatalf("LaunchCommand(%q) = %q %q; want %q %q", tt.name, cmd, args, tt.cmd, tt.args)
+			}
+		})
+	}
+}
+
+func TestLaunchCommandClearlyRejectsAdaptersWithoutVerifiedLauncher(t *testing.T) {
+	for _, name := range []string{"antigravity", "cline", "copilot", "windsurf"} {
+		if _, _, err := LaunchCommand(name); err == nil || !strings.Contains(err.Error(), "not supported") {
+			t.Errorf("LaunchCommand(%q) error = %v, want an explicit unsupported-launch error", name, err)
+		}
+	}
+	if _, _, err := LaunchCommand("missing"); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown adapter error = %v", err)
+	}
+}

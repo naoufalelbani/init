@@ -83,6 +83,7 @@ Usage:
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
   ai-init hooks check-staged [--path DIR]
   ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--dry-run]
+  ai-init wt open <TASK> --ide ADAPTER
   ai-init wt list|status|sync|integrate|cleanup [TASK]
   ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
   ai-init doctor
@@ -1190,7 +1191,7 @@ func previewSync(root, taskWorktree, targetBranch string, out io.Writer) error {
 
 func worktrees(args []string, w io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: ai-init wt new|list|status|sync|integrate|cleanup [task]")
+		return errors.New("usage: ai-init wt new|open|list|status|sync|integrate|cleanup [task]")
 	}
 	here, err := filepath.Abs(".")
 	if err != nil {
@@ -1201,6 +1202,38 @@ func worktrees(args []string, w io.Writer) error {
 		return errors.New("current directory is not inside a Git repository")
 	}
 	action := args[0]
+	if action == "open" {
+		if len(args) < 2 {
+			return errors.New("usage: ai-init wt open <task> --ide <adapter>")
+		}
+		task := args[1]
+		if !validTaskName(task) {
+			return errors.New("task name must be a single directory name")
+		}
+		ide := ""
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--ide":
+				if i+1 >= len(args) {
+					return errors.New("--ide requires an adapter name")
+				}
+				if ide != "" {
+					return errors.New("--ide may be specified only once")
+				}
+				i++
+				ide = strings.ToLower(args[i])
+			default:
+				return fmt.Errorf("unknown wt open option %q", args[i])
+			}
+		}
+		if ide == "" {
+			return errors.New("wt open requires --ide; run 'ai-init agents list' to see configured adapters")
+		}
+		if !slices.Contains(agentcfg.Names(), ide) {
+			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
+		}
+		return openWorktree(root, task, ide, w)
+	}
 	if action == "list" {
 		value, err := git(root, "worktree", "list", "--porcelain")
 		if err != nil {
@@ -1572,4 +1605,73 @@ func worktrees(args []string, w io.Writer) error {
 	default:
 		return fmt.Errorf("unknown worktree action %q", action)
 	}
+}
+
+func openWorktree(root, task, adapter string, w io.Writer) error {
+	return openWorktreeWith(root, task, adapter, w, exec.LookPath, func(cmd *exec.Cmd) error { return cmd.Run() })
+}
+
+func openWorktreeWith(root, task, adapter string, w io.Writer, lookPath func(string) (string, error), run func(*exec.Cmd) error) error {
+	command, args, err := agentcfg.LaunchCommand(adapter)
+	if err != nil {
+		return err
+	}
+	listing, err := git(root, "worktree", "list", "--porcelain")
+	if err != nil {
+		return err
+	}
+	var workspace string
+	for _, block := range strings.Split(listing, "\n\n") {
+		var path, branch string
+		for _, rawLine := range strings.Split(block, "\n") {
+			line := strings.TrimSpace(rawLine)
+			if strings.HasPrefix(line, "worktree ") {
+				path = strings.TrimPrefix(line, "worktree ")
+			} else if strings.HasPrefix(line, "branch ") {
+				branch = strings.TrimPrefix(line, "branch ")
+			}
+		}
+		if branch == "refs/heads/agent/"+task {
+			workspace = path
+			break
+		}
+	}
+	if workspace == "" {
+		return fmt.Errorf("no worktree found for task %q (expected branch agent/%s)", task, task)
+	}
+	executable, err := lookPath(command)
+	if err != nil && runtime.GOOS == "windows" {
+		executable, err = lookPath(command + ".ps1")
+	}
+	if err != nil {
+		return fmt.Errorf("cannot launch %s: %q was not found on PATH; install it or open %s manually", adapter, command, workspace)
+	}
+	cmdArgs := args
+	var cmd *exec.Cmd
+	switch {
+	case runtime.GOOS == "windows" && strings.EqualFold(filepath.Ext(executable), ".ps1"):
+		powershell, lookupErr := lookPath("powershell.exe")
+		if lookupErr != nil {
+			powershell, lookupErr = lookPath("pwsh.exe")
+		}
+		if lookupErr != nil {
+			return fmt.Errorf("cannot launch %s: PowerShell was not found on PATH", adapter)
+		}
+		cmdArgs = append([]string{"-NoProfile", "-File", executable}, args...)
+		cmd = exec.Command(powershell, cmdArgs...)
+	case runtime.GOOS == "windows" && (strings.EqualFold(filepath.Ext(executable), ".cmd") || strings.EqualFold(filepath.Ext(executable), ".bat")):
+		cmdArgs = append([]string{"/d", "/c", "call", executable}, args...)
+		cmd = exec.Command("cmd.exe", cmdArgs...)
+	default:
+		cmd = exec.Command(executable, args...)
+	}
+	cmd.Dir = workspace
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	fmt.Fprintf(w, "Opening %s worktree %s\n", adapter, workspace)
+	if err := run(cmd); err != nil {
+		return fmt.Errorf("launch %s in %s: %w", adapter, workspace, err)
+	}
+	return nil
 }

@@ -894,6 +894,47 @@ func TestConcurrentWorktreeCreationUsesDistinctTasksSafely(t *testing.T) {
 	}
 }
 
+func TestWorktreeOpenBuildsLaunchInRegisteredPathWithSpaces(t *testing.T) {
+	root, _ := integrationFixture(t, "launch workspace")
+	t.Chdir(root)
+	parent := filepath.Join(filepath.Dir(root), "task checkouts")
+	var output bytes.Buffer
+	if err := worktrees([]string{"new", "launch-test", "--worktree-parent", parent}, &output); err != nil {
+		t.Fatalf("create worktree: %v\n%s", err, output.String())
+	}
+	workspace := filepath.Join(parent, "launch workspace-worktrees", "launch-test")
+	output.Reset()
+	var invoked *exec.Cmd
+	lookPath := func(command string) (string, error) {
+		if command != "codex" {
+			return "", fmt.Errorf("unexpected executable lookup %q", command)
+		}
+		return filepath.Join(t.TempDir(), "fake tools", "codex"), nil
+	}
+	run := func(cmd *exec.Cmd) error {
+		invoked = cmd
+		return nil
+	}
+	if err := openWorktreeWith(root, "launch-test", "codex", &output, lookPath, run); err != nil {
+		t.Fatalf("open worktree: %v\n%s", err, output.String())
+	}
+	if invoked == nil {
+		t.Fatal("launcher process was not prepared")
+	}
+	gotDir, wantDir := filepath.Clean(invoked.Dir), filepath.Clean(workspace)
+	pathsMatch := gotDir == wantDir
+	if runtime.GOOS == "windows" {
+		pathsMatch = strings.EqualFold(gotDir, wantDir)
+	}
+	if !pathsMatch || filepath.Base(invoked.Path) != "codex" {
+		t.Fatalf("launcher command = path %q, dir %q; want codex in %q", invoked.Path, invoked.Dir, workspace)
+	}
+	wantOutputPath := filepath.ToSlash(workspace)
+	if !strings.Contains(filepath.ToSlash(output.String()), "Opening codex worktree "+wantOutputPath) {
+		t.Fatalf("open output does not identify selected workspace: %s", output.String())
+	}
+}
+
 func TestRunValidationCommandExecutesGoTests(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/validate\n\ngo 1.23\n"), 0600); err != nil {
