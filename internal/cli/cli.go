@@ -586,7 +586,7 @@ func writeAgents(root string, p project, dry bool, w io.Writer) error {
 		begin := strings.Index(text, start)
 		finishMarker := strings.Index(text, end)
 		if begin >= 0 || finishMarker >= 0 {
-			if begin < 0 || finishMarker < 0 || finishMarker < begin {
+			if begin < 0 || finishMarker < 0 || finishMarker < begin || strings.Count(text, start) != 1 || strings.Count(text, end) != 1 {
 				return errors.New("managed AGENTS.md markers are incomplete or out of order; preserving file")
 			}
 			relativeEnd := strings.Index(text[begin:], end)
@@ -621,7 +621,7 @@ func auditAgentsFile(path string) (string, error) {
 	if begin < 0 && finish < 0 {
 		return fmt.Sprintf("AGENTS.md contains custom instructions (%d bytes); no ai-init managed block", len(data)), nil
 	}
-	if begin < 0 || finish < 0 || finish < begin {
+	if begin < 0 || finish < 0 || finish < begin || strings.Count(text, start) != 1 || strings.Count(text, end) != 1 {
 		return "", errors.New("AGENTS.md managed markers are incomplete or out of order")
 	}
 	sectionStart := begin + len(start)

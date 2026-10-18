@@ -67,7 +67,7 @@ func TestAgentAuditDistinguishesManagedCustomAndInvalidFiles(t *testing.T) {
 	if err != nil || !strings.Contains(report, "custom instructions") {
 		t.Fatalf("custom audit report=%q err=%v", report, err)
 	}
-	for _, invalid := range []string{"", "<!-- ai-init:end -->\nbody", "<!-- ai-init:begin -->\n"} {
+	for _, invalid := range []string{"", "<!-- ai-init:end -->\nbody", "<!-- ai-init:begin -->\n", "<!-- ai-init:begin -->\na\n<!-- ai-init:end -->\n<!-- ai-init:begin -->\nb\n<!-- ai-init:end -->"} {
 		if err = os.WriteFile(path, []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
 		}
