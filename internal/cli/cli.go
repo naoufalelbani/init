@@ -444,7 +444,7 @@ func setup(args []string, w io.Writer) error {
 		}
 	}
 	if selected["gitattributes"] {
-		if e := writeGitAttributes(root, *dry, w); e != nil {
+		if e := writeGitAttributes(root, p.Git, *dry, w); e != nil {
 			return e
 		}
 	}
@@ -780,9 +780,6 @@ func verifySetup(root string, selected map[string]bool) error {
 	if selected["worktrees"] {
 		required = append(required, filepath.Join(".ai-init", "WORKTREES.md"))
 	}
-	if selected["gitattributes"] {
-		required = append(required, ".gitattributes")
-	}
 	for _, name := range required {
 		info, err := os.Stat(filepath.Join(root, name))
 		if err != nil {
@@ -800,13 +797,23 @@ func verifySetup(root string, selected map[string]bool) error {
 	return nil
 }
 
-func writeGitAttributes(root string, dry bool, w io.Writer) error {
+func writeGitAttributes(root string, gitRepo, dry bool, w io.Writer) error {
 	const begin = "# ai-init gitattributes:begin"
 	const end = "# ai-init gitattributes:end"
 	const body = "* text=auto\n*.sh text eol=lf\n*.bash text eol=lf\n*.bat text eol=crlf\n*.cmd text eol=crlf\n*.ps1 text eol=crlf"
 	path := filepath.Join(root, ".gitattributes")
 	old, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
+		if gitRepo {
+			tracked, gitErr := git(root, "ls-files", "-z")
+			if gitErr != nil {
+				return fmt.Errorf("inspect tracked files before writing .gitattributes: %w", gitErr)
+			}
+			if tracked != "" {
+				fmt.Fprintf(w, "  skipped %s (tracked files exist; adding text attributes may make existing files appear modified; review and migrate attributes manually)\n", path)
+				return nil
+			}
+		}
 		content := begin + "\n" + body + "\n" + end + "\n"
 		if dry {
 			writeUnifiedDiff(w, ".gitattributes", nil, []byte(content))
@@ -828,6 +835,19 @@ func writeGitAttributes(root string, dry bool, w io.Writer) error {
 	}
 	finish += len(end)
 	updated := text[:start] + begin + "\n" + body + "\n" + end + text[finish:]
+	if bytes.Equal(old, []byte(updated)) {
+		return writeFileSafe(path, updated, dry, w)
+	}
+	if gitRepo {
+		tracked, gitErr := git(root, "ls-files", "-z")
+		if gitErr != nil {
+			return fmt.Errorf("inspect tracked files before updating .gitattributes: %w", gitErr)
+		}
+		if tracked != "" {
+			fmt.Fprintf(w, "  preserved %s (tracked files exist; changing text attributes may make existing files appear modified; review and migrate attributes manually)\n", path)
+			return nil
+		}
+	}
 	if dry && !bytes.Equal(old, []byte(updated)) {
 		writeUnifiedDiff(w, ".gitattributes", old, []byte(updated))
 	}

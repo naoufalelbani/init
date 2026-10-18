@@ -962,15 +962,9 @@ func TestEmbeddedPromptAssetsMatchStandaloneFiles(t *testing.T) {
 	}
 }
 
-func TestSetupGitattributesAddsManagedCrossPlatformRulesWithoutRenormalizing(t *testing.T) {
-	root, _ := integrationFixture(t, "git attributes")
-	tracked := filepath.Join(root, "windows-script.cmd")
-	contents := []byte("@echo off\r\necho safe\r\n")
-	if err := os.WriteFile(tracked, contents, 0600); err != nil {
-		t.Fatal(err)
-	}
-	runGitTest(t, root, "add", "windows-script.cmd")
-	runGitTest(t, root, "commit", "-m", "add CRLF script")
+func TestSetupGitattributesAddsManagedRulesToEmptyGitRepo(t *testing.T) {
+	root := t.TempDir()
+	runGitTest(t, root, "init")
 	var output bytes.Buffer
 	if err := Run([]string{"setup", "--path", root, "--with", "gitattributes"}, &output, &output); err != nil {
 		t.Fatalf("setup: %v\n%s", err, output.String())
@@ -988,13 +982,6 @@ func TestSetupGitattributesAddsManagedCrossPlatformRulesWithoutRenormalizing(t *
 	if err != nil || !strings.Contains(attr, "text: set") || !strings.Contains(attr, "eol: crlf") {
 		t.Fatalf("Git did not apply the expected Windows script attributes: %q (%v)", attr, err)
 	}
-	after, err := os.ReadFile(tracked)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, contents) {
-		t.Fatalf("setup changed existing CRLF file bytes: %q", after)
-	}
 	status, err := git(root, "status", "--porcelain")
 	if err != nil || strings.TrimSpace(status) != "?? .gitattributes" {
 		t.Fatalf("unexpected worktree changes after setup: %q (%v)", status, err)
@@ -1006,6 +993,35 @@ func TestSetupGitattributesAddsManagedCrossPlatformRulesWithoutRenormalizing(t *
 	dataAgain, err := os.ReadFile(filepath.Join(root, ".gitattributes"))
 	if err != nil || !bytes.Equal(data, dataAgain) {
 		t.Fatalf("managed attributes are not idempotent: err=%v\n%s", err, dataAgain)
+	}
+}
+
+func TestSetupGitattributesSkipsTrackedCRLFFiles(t *testing.T) {
+	root, _ := integrationFixture(t, "tracked CRLF files")
+	tracked := filepath.Join(root, "windows-script.cmd")
+	contents := []byte("@echo off\r\necho safe\r\n")
+	if err := os.WriteFile(tracked, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "windows-script.cmd")
+	runGitTest(t, root, "commit", "-m", "add CRLF script")
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--with", "gitattributes"}, &output, &output); err != nil {
+		t.Fatalf("setup: %v\n%s", err, output.String())
+	}
+	if !strings.Contains(output.String(), "tracked files exist") {
+		t.Fatalf("tracked-file safety skip was not reported: %s", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".gitattributes")); !os.IsNotExist(err) {
+		t.Fatalf("setup wrote .gitattributes into a tracked repository: %v", err)
+	}
+	after, err := os.ReadFile(tracked)
+	if err != nil || !bytes.Equal(after, contents) {
+		t.Fatalf("setup changed existing CRLF file bytes: %q (%v)", after, err)
+	}
+	status, err := git(root, "status", "--porcelain")
+	if err != nil || status != "" {
+		t.Fatalf("setup dirtied the tracked repository: %q (%v)", status, err)
 	}
 }
 
@@ -1046,7 +1062,7 @@ func TestSetupGitattributesDryRunAndMalformedMarkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	original, _ := os.ReadFile(path)
-	if err := writeGitAttributes(root, false, &output); err == nil {
+	if err := writeGitAttributes(root, false, false, &output); err == nil {
 		t.Fatal("expected malformed managed block to be rejected")
 	}
 	after, err := os.ReadFile(path)
