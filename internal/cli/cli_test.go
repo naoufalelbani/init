@@ -921,7 +921,15 @@ func TestWorktreeOpenBuildsLaunchInRegisteredPathWithSpaces(t *testing.T) {
 	if invoked == nil {
 		t.Fatal("launcher process was not prepared")
 	}
-	gotDir, wantDir := filepath.Clean(invoked.Dir), filepath.Clean(workspace)
+	gotDir, err := filepath.EvalSymlinks(invoked.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDir, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotDir, wantDir = filepath.Clean(gotDir), filepath.Clean(wantDir)
 	pathsMatch := gotDir == wantDir
 	if runtime.GOOS == "windows" {
 		pathsMatch = strings.EqualFold(gotDir, wantDir)
@@ -929,7 +937,7 @@ func TestWorktreeOpenBuildsLaunchInRegisteredPathWithSpaces(t *testing.T) {
 	if !pathsMatch || filepath.Base(invoked.Path) != "codex" {
 		t.Fatalf("launcher command = path %q, dir %q; want codex in %q", invoked.Path, invoked.Dir, workspace)
 	}
-	wantOutputPath := filepath.ToSlash(workspace)
+	wantOutputPath := filepath.ToSlash(wantDir)
 	if !strings.Contains(filepath.ToSlash(output.String()), "Opening codex worktree "+wantOutputPath) {
 		t.Fatalf("open output does not identify selected workspace: %s", output.String())
 	}
