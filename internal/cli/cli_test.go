@@ -56,6 +56,54 @@ func TestWriteAgentsPreservesCustomInstructions(t *testing.T) {
 		t.Fatalf("output=%q", out.String())
 	}
 }
+
+func TestAgentAuditDistinguishesManagedCustomAndInvalidFiles(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "AGENTS.md")
+	if err := os.WriteFile(path, []byte("# local contract\nDo not rewrite architecture.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := auditAgentsFile(path)
+	if err != nil || !strings.Contains(report, "custom instructions") {
+		t.Fatalf("custom audit report=%q err=%v", report, err)
+	}
+	for _, invalid := range []string{"", "<!-- ai-init:end -->\nbody", "<!-- ai-init:begin -->\n"} {
+		if err = os.WriteFile(path, []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = auditAgentsFile(path); err == nil {
+			t.Fatalf("invalid AGENTS.md passed validation: %q", invalid)
+		}
+	}
+	valid := "<!-- ai-init:begin -->\nverified rules\n<!-- ai-init:end -->\n"
+	if err = os.WriteFile(path, []byte(valid), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, err = auditAgentsFile(path)
+	if err != nil || !strings.Contains(report, "managed instructions valid") {
+		t.Fatalf("managed audit report=%q err=%v", report, err)
+	}
+}
+
+func TestWriteAgentsPreservesBrokenMarkerPair(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "AGENTS.md")
+	want := "<!-- ai-init:end -->\ncustom text\n"
+	if err := os.WriteFile(path, []byte(want), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := writeAgents(root, analyze(root), false, &out); err == nil {
+		t.Fatal("expected malformed marker error")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("malformed instructions changed: %q", got)
+	}
+}
 func TestWriteManagedAgentsIdempotent(t *testing.T) {
 	root := t.TempDir()
 	p := analyze(root)
@@ -422,8 +470,22 @@ func TestSetupEmptyRepositoryCreatesInstructionsAndContext(t *testing.T) {
 			t.Fatalf("missing generated artifact %s: %v", path, err)
 		}
 	}
-	if !strings.Contains(output.String(), "Stack: unknown") || !strings.Contains(output.String(), "Validation: completed") {
+	if !strings.Contains(output.String(), "Stack: unknown") || !strings.Contains(output.String(), "Validation: passed for selected files") {
 		t.Fatalf("unexpected setup summary: %s", output.String())
+	}
+}
+
+func TestSetupDryRunDoesNotClaimValidationPassed(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--dry-run"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Validation: skipped") || strings.Contains(output.String(), "Validation: passed") {
+		t.Fatalf("dry-run validation status is misleading: %s", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created instructions: %v", err)
 	}
 }
 

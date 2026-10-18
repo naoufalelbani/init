@@ -434,7 +434,13 @@ func setup(args []string, w io.Writer) error {
 	if *verbose {
 		fmt.Fprintf(w, "\nPlatform: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	}
-	fmt.Fprintln(w, "Validation: completed for generated files")
+	if *dry {
+		fmt.Fprintln(w, "Validation: skipped (dry-run; no files were written)")
+	} else if err := verifySetup(root, selected); err != nil {
+		return fmt.Errorf("setup validation failed: %w", err)
+	} else {
+		fmt.Fprintln(w, "Validation: passed for selected files")
+	}
 	return nil
 }
 
@@ -578,7 +584,11 @@ func writeAgents(root string, p project, dry bool, w io.Writer) error {
 	if err == nil {
 		text := string(existing)
 		begin := strings.Index(text, start)
-		if begin >= 0 {
+		finishMarker := strings.Index(text, end)
+		if begin >= 0 || finishMarker >= 0 {
+			if begin < 0 || finishMarker < 0 || finishMarker < begin {
+				return errors.New("managed AGENTS.md markers are incomplete or out of order; preserving file")
+			}
 			relativeEnd := strings.Index(text[begin:], end)
 			if relativeEnd < 0 {
 				return errors.New("managed AGENTS.md block has no end marker; preserving file")
@@ -595,6 +605,63 @@ func writeAgents(root string, p project, dry bool, w io.Writer) error {
 	}
 	return writeFileSafe(path, start+"\n"+agentsTemplate(p)+"\n"+end+"\n", dry, w)
 }
+
+func auditAgentsFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("AGENTS.md: %w", err)
+	}
+	text := string(data)
+	if strings.TrimSpace(text) == "" {
+		return "", errors.New("AGENTS.md is empty")
+	}
+	start, end := "<!-- ai-init:begin -->", "<!-- ai-init:end -->"
+	begin := strings.Index(text, start)
+	finish := strings.Index(text, end)
+	if begin < 0 && finish < 0 {
+		return fmt.Sprintf("AGENTS.md contains custom instructions (%d bytes); no ai-init managed block", len(data)), nil
+	}
+	if begin < 0 || finish < 0 || finish < begin {
+		return "", errors.New("AGENTS.md managed markers are incomplete or out of order")
+	}
+	sectionStart := begin + len(start)
+	sectionEnd := finish
+	if strings.TrimSpace(text[sectionStart:sectionEnd]) == "" {
+		return "", errors.New("AGENTS.md managed block is empty")
+	}
+	return fmt.Sprintf("AGENTS.md managed instructions valid (%d bytes)", len(data)), nil
+}
+
+func verifySetup(root string, selected map[string]bool) error {
+	var required []string
+	if selected["agents"] {
+		required = append(required, "AGENTS.md")
+	}
+	if selected["memory"] {
+		for _, name := range []string{"PROJECT_MAP.md", "ARCHITECTURE.md", "CONVENTIONS.md", "CURRENT_STATE.md", "DECISIONS.md"} {
+			required = append(required, filepath.Join(".ai", name))
+		}
+	}
+	if selected["worktrees"] {
+		required = append(required, filepath.Join(".ai-init", "WORKTREES.md"))
+	}
+	for _, name := range required {
+		info, err := os.Stat(filepath.Join(root, name))
+		if err != nil {
+			return fmt.Errorf("verify %s: %w", name, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("verify %s: expected a regular file", name)
+		}
+	}
+	if selected["agents"] {
+		if _, err := auditAgentsFile(filepath.Join(root, "AGENTS.md")); err != nil {
+			return fmt.Errorf("verify AGENTS.md: %w", err)
+		}
+	}
+	return nil
+}
+
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -717,11 +784,11 @@ func agents(args []string, w io.Writer) error {
 	}
 	switch args[0] {
 	case "audit", "validate":
-		b, e := os.ReadFile(filepath.Join(root, "AGENTS.md"))
-		if e != nil {
-			return fmt.Errorf("AGENTS.md: %w", e)
+		report, auditErr := auditAgentsFile(filepath.Join(root, "AGENTS.md"))
+		if auditErr != nil {
+			return auditErr
 		}
-		fmt.Fprintf(w, "AGENTS.md present (%d bytes); custom content is preserved\n", len(b))
+		fmt.Fprintln(w, report)
 		return nil
 	default:
 		return fmt.Errorf("unknown agents action %q", args[0])
