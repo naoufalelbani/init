@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -969,6 +970,124 @@ func TestWorktreeNewWithIDEOpensOnlyAfterSetupAndLockRelease(t *testing.T) {
 	}
 	if !opened || !strings.Contains(output.String(), "Created ") {
 		t.Fatalf("worktree was not reported and opened: %s", output.String())
+	}
+}
+
+func TestWorktreePostgresIsolationLifecycleUsesTaskDatabaseAndExplicitCleanup(t *testing.T) {
+	root, _ := integrationFixture(t, "postgres isolation")
+	t.Chdir(root)
+	tools := t.TempDir()
+	toolSuffix := ""
+	if runtime.GOOS == "windows" {
+		toolSuffix = ".exe"
+	}
+	for _, name := range []string{"createdb", "dropdb"} {
+		if err := os.WriteFile(filepath.Join(tools, name+toolSuffix), []byte("test stub"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DATABASE_URL", "postgres://app_user:target_secret@db.example:5432/shared")
+	t.Setenv("ADMIN_DATABASE_URL", "postgres://db_admin:admin_secret@db.example:5432/postgres")
+	previousRunner := runPostgresClient
+	t.Cleanup(func() { runPostgresClient = previousRunner })
+	var created, dropped int
+	var databaseName string
+	var createFailure error
+	var output bytes.Buffer
+	runPostgresClient = func(_ context.Context, command string, args, env []string) error {
+		if command == "createdb" {
+			created++
+		} else if command == "dropdb" {
+			dropped++
+		} else {
+			t.Fatalf("unexpected PostgreSQL command %q", command)
+		}
+		for _, arg := range args {
+			if strings.HasPrefix(arg, "--owner=") && strings.TrimPrefix(arg, "--owner=") != "app_user" {
+				t.Fatalf("unexpected database owner flag %q", arg)
+			}
+			if strings.Contains(arg, "admin_secret") || strings.Contains(arg, "target_secret") {
+				t.Fatalf("credential leaked in client argument %q", arg)
+			}
+		}
+		if strings.Contains(strings.Join(env, "\n"), "admin_secret") || strings.Contains(strings.Join(env, "\n"), "target_secret") {
+			t.Fatal("credential leaked in PostgreSQL client environment")
+		}
+		if command == "createdb" {
+			for _, arg := range args {
+				if strings.HasPrefix(arg, "ai_init_") {
+					databaseName = arg
+				}
+			}
+		}
+		if command == "createdb" && createFailure != nil {
+			return createFailure
+		}
+		return nil
+	}
+	if err := worktrees([]string{"new", "isolated-task", "--isolate-postgres-env", "DATABASE_URL", "--postgres-admin-env", "ADMIN_DATABASE_URL"}, &output); err != nil {
+		t.Fatalf("create isolated task worktree: %v\n%s", err, output.String())
+	}
+	if created != 1 || databaseName == "" || dropped != 0 {
+		t.Fatalf("create/drop calls = %d/%d, database %q", created, dropped, databaseName)
+	}
+	workspace := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", "isolated-task")
+	snapshot, err := os.ReadFile(filepath.Join(workspace, ".ai-init.env.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var environmentValues map[string]string
+	if err = json.Unmarshal(snapshot, &environmentValues); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(environmentValues["DATABASE_URL"], "/"+databaseName) || strings.Contains(string(snapshot), "admin_secret") {
+		t.Fatalf("unexpected task environment snapshot: %s", snapshot)
+	}
+	metadataPath, err := taskDatabaseMetadataPath(root, "isolated-task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(metadataPath); err != nil {
+		t.Fatalf("task database recovery metadata missing: %v", err)
+	}
+	if err = worktrees([]string{"cleanup", "isolated-task"}, &output); err == nil || !strings.Contains(err.Error(), "--drop-database") {
+		t.Fatalf("cleanup without explicit database drop should refuse, got %v", err)
+	}
+	if err = worktrees([]string{"cleanup", "isolated-task", "--drop-database", "--postgres-admin-env", "ADMIN_DATABASE_URL", "--dry-run"}, &output); err != nil {
+		t.Fatalf("database cleanup dry run: %v", err)
+	}
+	if dropped != 0 {
+		t.Fatal("dry-run dropped the task database")
+	}
+	if err = worktrees([]string{"cleanup", "isolated-task", "--drop-database", "--postgres-admin-env", "ADMIN_DATABASE_URL"}, &output); err != nil {
+		t.Fatalf("database cleanup: %v\n%s", err, output.String())
+	}
+	if dropped != 1 {
+		t.Fatalf("drop calls = %d, want 1", dropped)
+	}
+	if _, err = os.Stat(metadataPath); !os.IsNotExist(err) {
+		t.Fatalf("database metadata remains after cleanup: %v", err)
+	}
+	if strings.Contains(output.String(), "admin_secret") || strings.Contains(output.String(), "target_secret") {
+		t.Fatal("CLI output exposed a database credential")
+	}
+	createFailure = fmt.Errorf("simulated client failure")
+	if err = worktrees([]string{"new", "uncertain-task", "--isolate-postgres-env", "DATABASE_URL", "--postgres-admin-env", "ADMIN_DATABASE_URL"}, &output); err == nil {
+		t.Fatal("expected simulated PostgreSQL creation failure")
+	}
+	if dropped != 1 {
+		t.Fatalf("failed create triggered automatic database drop: %d drop calls", dropped-1)
+	}
+	uncertainMetadata, pathErr := taskDatabaseMetadataPath(root, "uncertain-task")
+	if pathErr != nil {
+		t.Fatal(pathErr)
+	}
+	if _, err = os.Stat(uncertainMetadata); err != nil {
+		t.Fatalf("ambiguous create failure lost its recovery record: %v", err)
+	}
+	if err = os.Remove(uncertainMetadata); err != nil {
+		t.Fatal(err)
 	}
 }
 

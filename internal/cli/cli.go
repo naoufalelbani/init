@@ -2,6 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,10 +25,16 @@ import (
 	hookguard "github.com/naoufalelbani/init/internal/hooks"
 	"github.com/naoufalelbani/init/internal/indexing"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
+	"github.com/naoufalelbani/init/internal/postgres"
 	"github.com/naoufalelbani/init/internal/validation"
 )
 
 const version = "0.1.0"
+const postgresOperationTimeout = 2 * time.Minute
+
+// runPostgresClient is the process seam for database lifecycle tests. Production
+// uses argument-based execution and never logs client output or credentials.
+var runPostgresClient postgres.Runner = postgres.ExecRunner
 
 type project = analyzer.Project
 
@@ -84,9 +92,9 @@ Usage:
   ai-init memory generate|update [--path DIR]
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
   ai-init hooks check-staged [--path DIR]
-  ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--dry-run]
+  ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--isolate-postgres-env NAME --postgres-admin-env NAME] [--dry-run]
   ai-init wt open <TASK> --ide ADAPTER
-  ai-init wt list|status|sync|integrate|cleanup [TASK]
+  ai-init wt list|status|sync|integrate|cleanup [TASK] [--drop-database --postgres-admin-env NAME]
   ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
   ai-init doctor [--path DIR]
   ai-init version`)
@@ -1319,6 +1327,7 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 		dry := false
 		var services []string
 		var environmentKeys []string
+		var isolatePostgresEnv, postgresAdminEnv string
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
 			case "--ide":
@@ -1339,6 +1348,18 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 				}
 				i++
 				environmentKeys = append(environmentKeys, args[i])
+			case "--isolate-postgres-env":
+				if i+1 >= len(args) || isolatePostgresEnv != "" {
+					return errors.New("--isolate-postgres-env requires one environment variable name")
+				}
+				i++
+				isolatePostgresEnv = args[i]
+			case "--postgres-admin-env":
+				if i+1 >= len(args) || postgresAdminEnv != "" {
+					return errors.New("--postgres-admin-env requires one environment variable name")
+				}
+				i++
+				postgresAdminEnv = args[i]
 			case "--dry-run":
 				dry = true
 			case "--worktree-parent":
@@ -1350,6 +1371,32 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 				return fmt.Errorf("unknown wt new option %q", args[i])
 			}
 		}
+		if (isolatePostgresEnv == "") != (postgresAdminEnv == "") {
+			return errors.New("--isolate-postgres-env and --postgres-admin-env must be used together")
+		}
+		if isolatePostgresEnv != "" {
+			if strings.EqualFold(isolatePostgresEnv, postgresAdminEnv) {
+				return errors.New("target and administrator environment variables must be different")
+			}
+			for _, key := range environmentKeys {
+				if strings.EqualFold(key, postgresAdminEnv) {
+					return errors.New("administrator credentials cannot be copied into a worktree environment snapshot")
+				}
+			}
+			var normalizedKeys []string
+			for _, key := range environmentKeys {
+				if !strings.EqualFold(key, isolatePostgresEnv) {
+					normalizedKeys = append(normalizedKeys, key)
+				}
+			}
+			environmentKeys = append(normalizedKeys, isolatePostgresEnv)
+			if _, err := exec.LookPath("createdb"); err != nil {
+				return errors.New("PostgreSQL createdb is required for --isolate-postgres-env")
+			}
+			if _, err := exec.LookPath("dropdb"); err != nil {
+				return errors.New("PostgreSQL dropdb is required for --isolate-postgres-env and safe cleanup")
+			}
+		}
 		if ide != "" && !slices.Contains(agentcfg.Names(), strings.ToLower(ide)) {
 			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
 		}
@@ -1359,6 +1406,38 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 			return environmentErr
 		}
 		databaseKeys := envprop.DatabaseConnectionKeys(orderedEnvironmentKeys)
+		var isolatedDatabaseName string
+		var isolatedAdmin postgres.Connection
+		var databaseMetadata postgres.Metadata
+		if isolatePostgresEnv != "" {
+			adminValues, _, captureErr := envprop.CaptureProcess([]string{postgresAdminEnv})
+			if captureErr != nil {
+				return captureErr
+			}
+			targetURL, _, adminConn, parseErr := postgres.ParsePair(environmentValues[isolatePostgresEnv], adminValues[postgresAdminEnv])
+			if parseErr != nil {
+				return parseErr
+			}
+			adminConn.OmitEnvironment = []string{postgresAdminEnv, isolatePostgresEnv}
+			isolatedDatabaseName, err = postgres.NewDatabaseName(task)
+			if err != nil {
+				return err
+			}
+			isolatedAdmin = adminConn
+			databaseMetadata = postgres.Fingerprint(adminConn)
+			databaseMetadata.Task = task
+			databaseMetadata.Database = isolatedDatabaseName
+			databaseMetadata.Environment = isolatePostgresEnv
+			environmentValues[isolatePostgresEnv] = postgres.IsolateURL(targetURL, isolatedDatabaseName)
+			var remaining []string
+			for _, key := range databaseKeys {
+				if !strings.EqualFold(key, isolatePostgresEnv) {
+					remaining = append(remaining, key)
+				}
+			}
+			databaseKeys = remaining
+			fmt.Fprintf(w, "PostgreSQL isolation requested for %s: task database %s will be provisioned on the explicitly selected server; admin credentials will not be copied or displayed.\n", isolatePostgresEnv, isolatedDatabaseName)
+		}
 		if len(databaseKeys) > 0 {
 			fmt.Fprintf(w, "Warning: selected database-related variables (%s) may point to shared data services. ai-init does not isolate databases; do not run migrations, reset/seed/drop operations, or write shared data without explicit authorization.\n", strings.Join(databaseKeys, ", "))
 		}
@@ -1377,6 +1456,9 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 			fmt.Fprintf(w, "Would create worktree %s on branch %s\n", dest, branch)
 			if len(orderedEnvironmentKeys) > 0 {
 				fmt.Fprintf(w, "Would copy explicitly selected environment variables %s to an ignored task-local JSON file; values are not displayed\n", strings.Join(orderedEnvironmentKeys, ", "))
+			}
+			if isolatePostgresEnv != "" {
+				fmt.Fprintf(w, "Would create isolated PostgreSQL database %s and set %s to its task-local URL\n", isolatedDatabaseName, isolatePostgresEnv)
 			}
 			if ide != "" {
 				fmt.Fprintf(w, "Would configure %s instructions\n", ide)
@@ -1439,6 +1521,9 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 		exclude := ""
 		excludeEntryAdded := false
 		envExcludeEntryAdded := false
+		databaseProvisionAttempted := false
+		databaseMetadataWritten := false
+		databaseMetadataPath := ""
 		defer func() {
 			if committed {
 				return
@@ -1470,7 +1555,66 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 					fmt.Fprintf(w, "Recovery needed: remove ai-init environment ignore entry from %s manually: %v\n", exclude, cleanupErr)
 				}
 			}
+			removeDatabaseMetadata := databaseMetadataWritten
+			if databaseProvisionAttempted {
+				cleanupContext, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+				cleanupErr := postgres.Drop(cleanupContext, isolatedAdmin, isolatedDatabaseName, runPostgresClient)
+				cancel()
+				if cleanupErr != nil {
+					removeDatabaseMetadata = false
+					fmt.Fprintf(w, "Recovery needed: inspect/drop isolated database %s using environment variable %s; automatic rollback failed.\n", isolatedDatabaseName, postgresAdminEnv)
+				}
+			}
+			if removeDatabaseMetadata {
+				if cleanupErr := os.Remove(databaseMetadataPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
+					fmt.Fprintf(w, "Recovery needed: remove isolated database record %s manually: %v\n", databaseMetadataPath, cleanupErr)
+				}
+			}
 		}()
+		if isolatePostgresEnv != "" {
+			databaseMetadataPath, err = taskDatabaseMetadataPath(root, task)
+			if err != nil {
+				return err
+			}
+			if _, statErr := os.Lstat(databaseMetadataPath); statErr == nil {
+				return errors.New("task already has isolated database metadata; inspect it before reusing this task name")
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			}
+			if err = os.MkdirAll(filepath.Dir(databaseMetadataPath), 0700); err != nil {
+				return fmt.Errorf("create task database metadata directory: %w", err)
+			}
+			metadataBytes, marshalErr := json.MarshalIndent(databaseMetadata, "", "  ")
+			if marshalErr != nil {
+				return marshalErr
+			}
+			metadataFile, writeErr := os.OpenFile(databaseMetadataPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+			if writeErr != nil {
+				return fmt.Errorf("write task database metadata: %w", writeErr)
+			}
+			if _, writeErr = metadataFile.Write(append(metadataBytes, '\n')); writeErr == nil {
+				writeErr = metadataFile.Sync()
+			}
+			closeErr := metadataFile.Close()
+			if writeErr == nil {
+				writeErr = closeErr
+			}
+			if writeErr != nil {
+				_ = os.Remove(databaseMetadataPath)
+				return fmt.Errorf("write task database metadata: %w", writeErr)
+			}
+			databaseMetadataWritten = true
+			databaseProvisionAttempted = true
+			createContext, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+			createErr := postgres.Create(createContext, isolatedAdmin, isolatedDatabaseName, runPostgresClient)
+			cancel()
+			if createErr != nil {
+				databaseProvisionAttempted = false
+				databaseMetadataWritten = false // Keep the recovery record; the server may have created the database before the client failed.
+				fmt.Fprintf(w, "Recovery needed: PostgreSQL creation returned an error. Inspect database %s on the selected server before retrying; metadata is at %s. No automatic drop was attempted.\n", isolatedDatabaseName, databaseMetadataPath)
+				return createErr
+			}
+		}
 		if len(environmentValues) > 0 {
 			envPath := filepath.Join(dest, ".ai-init.env.json")
 			if err = envprop.WriteSnapshot(envPath, environmentValues); err != nil {
@@ -1528,6 +1672,9 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 		}
 		if len(databaseKeys) > 0 {
 			environmentInfo += fmt.Sprintf("\nDatabase safety: %s may contain shared database connections. ai-init does not isolate databases. Do not migrate, reset, seed, drop, or write shared data without explicit authorization; configure an isolated database and replace the task-local connection values before database-changing tests.", strings.Join(databaseKeys, ", "))
+		}
+		if isolatePostgresEnv != "" {
+			environmentInfo += fmt.Sprintf("\nPostgreSQL isolation: %s was rewritten to task database %s on the explicitly selected server. The administrator URL was not copied. Keep database-changing tests scoped to this database.", isolatePostgresEnv, isolatedDatabaseName)
 		}
 		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: `AGENTS.md`\n- Architecture references: `README.md` and existing `docs/` files when present\n- Verification hints: %s\n\n## Port allocations\n%s\n## Environment\n%s\n\nDo not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch, joinOrUnknown(p.Tests), portInfo.String(), environmentInfo)
 		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
@@ -1599,12 +1746,72 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 		return integrate(root, dest, task, w, dry)
 	case "cleanup":
 		dry := false
-		for _, option := range args[2:] {
-			if option == "--dry-run" {
+		dropDatabase := false
+		adminEnvKey := ""
+		for i := 2; i < len(args); i++ {
+			switch args[i] {
+			case "--dry-run":
 				dry = true
-			} else {
-				return fmt.Errorf("unknown wt cleanup option %q", option)
+			case "--drop-database":
+				dropDatabase = true
+			case "--postgres-admin-env":
+				if i+1 >= len(args) || adminEnvKey != "" {
+					return errors.New("--postgres-admin-env may be specified only once")
+				}
+				i++
+				adminEnvKey = args[i]
+			default:
+				return fmt.Errorf("unknown wt cleanup option %q", args[i])
 			}
+		}
+		if dropDatabase != (adminEnvKey != "") {
+			return errors.New("--drop-database and --postgres-admin-env must be used together")
+		}
+		metadataPath, pathErr := taskDatabaseMetadataPath(root, task)
+		if pathErr != nil {
+			return pathErr
+		}
+		metadataInfo, metadataErr := os.Lstat(metadataPath)
+		var databaseMetadata postgres.Metadata
+		hasDatabase := metadataErr == nil
+		if metadataErr != nil && !os.IsNotExist(metadataErr) {
+			return fmt.Errorf("inspect task database metadata: %w", metadataErr)
+		}
+		if hasDatabase && !metadataInfo.Mode().IsRegular() {
+			return errors.New("task database metadata is not a regular file; refusing cleanup")
+		}
+		var metadataBytes []byte
+		if hasDatabase {
+			metadataBytes, metadataErr = os.ReadFile(metadataPath)
+			if metadataErr != nil {
+				return fmt.Errorf("read task database metadata: %w", metadataErr)
+			}
+			if !dropDatabase {
+				return errors.New("worktree owns an isolated database; cleanup requires --drop-database --postgres-admin-env NAME")
+			}
+			if err = json.Unmarshal(metadataBytes, &databaseMetadata); err != nil {
+				return errors.New("task database metadata is invalid; refusing cleanup")
+			}
+			if err = postgres.ValidateMetadata(databaseMetadata, task); err != nil {
+				return err
+			}
+		} else if dropDatabase {
+			return errors.New("no isolated database metadata exists for this worktree")
+		}
+		var cleanupAdmin postgres.Connection
+		if hasDatabase {
+			adminValues, _, captureErr := envprop.CaptureProcess([]string{adminEnvKey})
+			if captureErr != nil {
+				return captureErr
+			}
+			cleanupAdmin, err = postgres.ParseAdminURL(adminValues[adminEnvKey])
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(cleanupAdmin.Host, databaseMetadata.Host) || cleanupAdmin.Port != databaseMetadata.Port || cleanupAdmin.User != databaseMetadata.User {
+				return errors.New("administrator URL does not match the database endpoint recorded for this worktree")
+			}
+			cleanupAdmin.OmitEnvironment = []string{adminEnvKey, databaseMetadata.Environment}
 		}
 		status, err := git(dest, "status", "--porcelain")
 		if err != nil {
@@ -1628,10 +1835,26 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 		}
 		if dry {
 			fmt.Fprintf(w, "Would remove clean, integrated worktree %s\n", dest)
+			if hasDatabase {
+				fmt.Fprintf(w, "Would drop task database %s using %s\n", databaseMetadata.Database, adminEnvKey)
+			}
 			return nil
+		}
+		if hasDatabase {
+			cleanupContext, cancel := context.WithTimeout(context.Background(), postgresOperationTimeout)
+			err = postgres.Drop(cleanupContext, cleanupAdmin, databaseMetadata.Database, runPostgresClient)
+			cancel()
+			if err != nil {
+				return err
+			}
 		}
 		if _, err = git(root, "worktree", "remove", dest); err != nil {
 			return err
+		}
+		if hasDatabase {
+			if err = os.Remove(metadataPath); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("worktree and database removed, but task database metadata could not be removed at %s: %w", metadataPath, err)
+			}
 		}
 		if err = portalloc.Release(root, task); err != nil {
 			return fmt.Errorf("worktree removed but port records could not be released: %w", err)
@@ -1641,6 +1864,17 @@ func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapt
 	default:
 		return fmt.Errorf("unknown worktree action %q", action)
 	}
+}
+
+func taskDatabaseMetadataPath(root, task string) (string, error) {
+	commonDir, err := git(root, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(root, commonDir)
+	}
+	return filepath.Join(commonDir, "ai-init-databases", task+".json"), nil
 }
 
 func openWorktree(root, task, adapter string, w io.Writer) error {
