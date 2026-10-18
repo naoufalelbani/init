@@ -1,6 +1,6 @@
 # Architecture
 
-The executable entrypoint is `cmd/ai-init`. Command orchestration lives in `internal/cli`; repository fact detection is isolated in `internal/analyzer`, and `internal/indexing` produces a bounded, path-only Git inventory with a filesystem fallback. Adapters, hooks, environment snapshots, and port allocation also have separate internal packages. Analysis and safe generation use the Go standard library. Process execution is argument-based. More of the CLI's remaining worktree, integration, and filesystem coordination can be extracted as those domains grow.
+The executable entrypoint is `cmd/ai-init`. Command orchestration lives in `internal/cli`; repository fact detection is isolated in `internal/analyzer`, and `internal/indexing` produces a bounded, path-only Git inventory with a filesystem fallback. `internal/validation` checks executable and local-wrapper prerequisites implied by detected project build/test hints without running project commands. Adapters, hooks, environment snapshots, and port allocation also have separate internal packages. Analysis and safe generation use the Go standard library. Process execution is argument-based. More of the CLI's remaining worktree, integration, and filesystem coordination can be extracted as those domains grow.
 
 Generated files are editable output. Existing custom `AGENTS.md` is not modified. Managed instruction and context blocks have visible markers; updates replace only those blocks and retain surrounding manual notes. Backups are kept on updates.
 

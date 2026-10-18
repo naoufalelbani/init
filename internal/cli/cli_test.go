@@ -45,6 +45,37 @@ func TestAnalyzeGoProject(t *testing.T) {
 		t.Fatalf("sources=%v", p.Sources)
 	}
 }
+
+func TestDoctorChecksDetectedProjectToolsAndReturnsNonzeroWhenMissing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project with space")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/doctor\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir()
+	t.Setenv("PATH", path)
+	var output bytes.Buffer
+	err := doctor([]string{"--path", root}, &output)
+	if err == nil || !strings.Contains(err.Error(), "install missing tool(s): go") {
+		t.Fatalf("doctor error=%v", err)
+	}
+	if !strings.Contains(output.String(), "Project: project with space") || !strings.Contains(output.String(), "Missing: go") {
+		t.Fatalf("project-aware missing-tool report absent: %s", output.String())
+	}
+}
+
+func TestDoctorReportsNoDetectedRequirementsForEmptyProject(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	if err := doctor([]string{"--path", root}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "No project build or test tool requirements were detected") {
+		t.Fatalf("unexpected doctor report: %s", output.String())
+	}
+}
 func TestWriteAgentsPreservesCustomInstructions(t *testing.T) {
 	root := t.TempDir()
 	want := "# custom rule\nkeep this\n"

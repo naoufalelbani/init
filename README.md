@@ -60,7 +60,8 @@ ai-init memory update
 - `prompt agents|worktrees|audit|config`: display a reusable prompt or export it with `--output FILE` (existing files are never overwritten).
 - `setup --with gitattributes`: add managed cross-platform text rules only when `.gitattributes` is absent and the Git index has no tracked files. Existing custom files and tracked repositories are preserved; setup never renormalizes existing files.
 - `setup --with hooks`: install a local pre-commit check only when Git is using its default hooks path, no hook already exists, and `ai-init` is on `PATH` for Git to invoke. `ai-init hooks check-staged` can also be run directly.
-- `doctor`, `version`, `help`.
+- `doctor [--path DIR]`: inspect the detected project and report whether required build/test executables and local wrappers are available. It does not run project commands and returns a failing status when a detected prerequisite is missing. It checks availability, not versions, dependencies, services, or build/test success.
+- `version`, `help`.
 
 ## Agent configuration
 

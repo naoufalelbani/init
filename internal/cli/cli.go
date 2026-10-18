@@ -23,6 +23,7 @@ import (
 	hookguard "github.com/naoufalelbani/init/internal/hooks"
 	"github.com/naoufalelbani/init/internal/indexing"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
+	"github.com/naoufalelbani/init/internal/validation"
 )
 
 const version = "0.1.0"
@@ -54,7 +55,7 @@ func Run(args []string, out, errOut io.Writer) error {
 		printProject(out, root, p)
 		return nil
 	case "doctor":
-		return doctor(out)
+		return doctor(args[1:], out)
 	case "setup":
 		return setup(args[1:], out)
 	case "agents":
@@ -87,7 +88,7 @@ Usage:
   ai-init wt open <TASK> --ide ADAPTER
   ai-init wt list|status|sync|integrate|cleanup [TASK]
   ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
-  ai-init doctor
+  ai-init doctor [--path DIR]
   ai-init version`)
 }
 func target(args []string) (string, []string, error) {
@@ -984,16 +985,34 @@ func prompt(args []string, w io.Writer) error {
 	_, e = w.Write(b)
 	return e
 }
-func doctor(w io.Writer) error {
-	fmt.Fprintf(w, "Platform: %s/%s\nGo runtime: %s\n", runtime.GOOS, runtime.GOARCH, runtime.Version())
-	for _, tool := range []string{"git", "go"} {
-		p, e := exec.LookPath(tool)
-		if e != nil {
-			fmt.Fprintf(w, "%s: unavailable\n", tool)
-		} else {
-			fmt.Fprintf(w, "%s: %s\n", tool, p)
-		}
+func doctor(args []string, w io.Writer) error {
+	root, _, err := target(args)
+	if err != nil {
+		return err
 	}
+	project, err := analyzer.Analyze(root)
+	if err != nil {
+		return fmt.Errorf("analyze project for environment checks: %w", err)
+	}
+	fmt.Fprintf(w, "Platform: %s/%s\nGo runtime: %s\nProject: %s\nStack: %s\nGit: %t\n", runtime.GOOS, runtime.GOARCH, runtime.Version(), project.Name, joinOrUnknown(project.Languages), project.Git)
+	checks := validation.CheckProjectWithDefaults(root, project)
+	if len(checks) == 0 {
+		fmt.Fprintln(w, "No project build or test tool requirements were detected.")
+		return nil
+	}
+	var missing []string
+	for _, check := range checks {
+		if check.Err != nil {
+			fmt.Fprintf(w, "Missing: %s (required by %s)\n", check.Command, strings.Join(check.Sources, ", "))
+			missing = append(missing, check.Command)
+			continue
+		}
+		fmt.Fprintf(w, "Available: %s (%s)\n", check.Command, check.Path)
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("environment validation failed; install missing tool(s): %s", strings.Join(missing, ", "))
+	}
+	fmt.Fprintf(w, "Environment validation: passed (%d required tool(s))\n", len(checks))
 	return nil
 }
 func git(root string, args ...string) (string, error) {
