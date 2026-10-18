@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -42,20 +43,9 @@ func Allocate(root, task, service string) (int, error) {
 	if existing := registry.Allocations[task][service]; existing > 0 {
 		return existing, nil
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	port, err := selectAvailablePort(registry)
 	if err != nil {
-		return 0, fmt.Errorf("find available port: %w", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if err = listener.Close(); err != nil {
 		return 0, err
-	}
-	for _, services := range registry.Allocations {
-		for _, allocated := range services {
-			if allocated == port {
-				return 0, errors.New("selected port is already present in project allocation records; retry")
-			}
-		}
 	}
 	if registry.Allocations[task] == nil {
 		registry.Allocations[task] = map[string]int{}
@@ -65,6 +55,42 @@ func Allocate(root, task, service string) (int, error) {
 		return 0, err
 	}
 	return port, nil
+}
+
+func selectAvailablePort(registry Registry) (int, error) {
+	var held []net.Listener
+	defer func() {
+		for _, listener := range held {
+			_ = listener.Close()
+		}
+	}()
+	for attempt := 0; attempt < 128; attempt++ {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 0, fmt.Errorf("find available port: %w", err)
+		}
+		port := listener.Addr().(*net.TCPAddr).Port
+		if allocationContainsPort(registry, port) {
+			held = append(held, listener)
+			continue
+		}
+		if err := listener.Close(); err != nil {
+			return 0, err
+		}
+		return port, nil
+	}
+	return 0, errors.New("could not find an unallocated loopback port after 128 attempts")
+}
+
+func allocationContainsPort(registry Registry, port int) bool {
+	for _, services := range registry.Allocations {
+		for _, allocated := range services {
+			if allocated == port {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func Preview(root, task, service string) (int, error) {
@@ -207,15 +233,29 @@ func acquire(lock string) error {
 		if err == nil {
 			return nil
 		}
-		if !os.IsExist(err) {
+		if !isLockContention(err, lock) {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for port allocation lock %s; inspect and remove it only if no ai-init process is using it", lock)
+			return fmt.Errorf("timed out waiting for port allocation lock %s (last create error: %v); inspect and remove it only if no ai-init process is using it", lock, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func isLockContention(createErr error, lock string) bool {
+	if os.IsExist(createErr) {
+		return true
+	}
+	// Windows can report access denied when another process creates the same
+	// directory, even if that process removes it before the follow-up stat.
+	if runtime.GOOS == "windows" && os.IsPermission(createErr) {
+		return true
+	}
+	info, err := os.Stat(lock)
+	return err == nil && info.IsDir()
+}
+
 func SortedTasks(value Registry) []string {
 	tasks := make([]string, 0, len(value.Allocations))
 	for task := range value.Allocations {

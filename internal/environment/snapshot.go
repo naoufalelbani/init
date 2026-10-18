@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strings"
 )
 
 var keyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -37,6 +38,30 @@ func Capture(keys []string, lookup func(string) (string, bool)) (map[string]stri
 
 func CaptureProcess(keys []string) (map[string]string, []string, error) {
 	return Capture(keys, os.LookupEnv)
+}
+
+// DatabaseConnectionKeys identifies explicitly selected environment keys that
+// are likely to carry credentials or endpoints for shared data services.
+func DatabaseConnectionKeys(keys []string) []string {
+	var matches []string
+	for _, key := range keys {
+		upper := strings.ToUpper(key)
+		if strings.Contains(upper, "DATABASE") || strings.Contains(upper, "_DB_") || strings.HasSuffix(upper, "_DB") {
+			matches = append(matches, key)
+			continue
+		}
+		for _, prefix := range []string{
+			"DB_", "DBURL", "DBURI", "DBHOST", "DBPORT", "DBNAME", "POSTGRES", "POSTGRESQL", "MYSQL", "MARIADB", "MONGO", "MONGODB", "REDIS", "ELASTICSEARCH", "DATASOURCE", "JDBC", "SQLSERVER", "MSSQL", "ORACLE", "COCKROACH", "CLICKHOUSE", "SNOWFLAKE",
+			"PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD",
+		} {
+			if strings.HasPrefix(upper, prefix) {
+				matches = append(matches, key)
+				break
+			}
+		}
+	}
+	sort.Strings(matches)
+	return matches
 }
 
 func Marshal(values map[string]string) ([]byte, error) {

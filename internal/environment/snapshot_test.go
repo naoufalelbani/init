@@ -47,6 +47,14 @@ func TestCaptureRejectsMissingAndMalformedKeys(t *testing.T) {
 	}
 }
 
+func TestDatabaseConnectionKeysFindsLikelySharedDataEndpoints(t *testing.T) {
+	keys := DatabaseConnectionKeys([]string{"API_TOKEN", "DATABASE_URL", "APP_DB_HOST", "PGHOST", "REDIS_URL", "PORT"})
+	want := []string{"APP_DB_HOST", "DATABASE_URL", "PGHOST", "REDIS_URL"}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatalf("database connection keys=%v, want %v", keys, want)
+	}
+}
+
 func TestWriteSnapshotIsPrivateAndNeverOverwrites(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "task.env.json")
 	if err := WriteSnapshot(path, map[string]string{"TOKEN": "value"}); err != nil {

@@ -775,10 +775,11 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 func TestWorktreeEnvironmentPropagationRequiresAllowlistAndStaysIgnored(t *testing.T) {
 	root, _ := integrationFixture(t, "env propagation")
 	t.Setenv("AI_INIT_TEST_TOKEN", "secret value with $ and quotes \" ")
+	t.Setenv("DATABASE_URL", "postgres://task-user:p4ss@localhost/shared")
 	t.Setenv("AI_INIT_TEST_UNSELECTED", "must not be copied")
 	t.Chdir(root)
 	var output bytes.Buffer
-	if err := worktrees([]string{"new", "env-task", "--env", "AI_INIT_TEST_TOKEN"}, &output); err != nil {
+	if err := worktrees([]string{"new", "env-task", "--env", "AI_INIT_TEST_TOKEN", "--env", "DATABASE_URL"}, &output); err != nil {
 		t.Fatalf("create worktree: %v\n%s", err, output.String())
 	}
 	dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", "env-task")
@@ -790,14 +791,18 @@ func TestWorktreeEnvironmentPropagationRequiresAllowlistAndStaysIgnored(t *testi
 	if err = json.Unmarshal(data, &values); err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values["AI_INIT_TEST_TOKEN"] != `secret value with $ and quotes " ` {
+	if len(values) != 2 || values["AI_INIT_TEST_TOKEN"] != `secret value with $ and quotes " ` || values["DATABASE_URL"] != "postgres://task-user:p4ss@localhost/shared" {
 		t.Fatalf("unexpected allowlisted environment snapshot: %#v", values)
 	}
-	if strings.Contains(output.String(), "secret value") || strings.Contains(string(mustRead(t, filepath.Join(dest, ".agent-task.md"))), "secret value") {
+	primer := string(mustRead(t, filepath.Join(dest, ".agent-task.md")))
+	if strings.Contains(output.String(), "secret value") || strings.Contains(output.String(), "p4ss") || strings.Contains(primer, "secret value") || strings.Contains(primer, "p4ss") {
 		t.Fatal("secret value leaked into CLI output or task primer")
 	}
-	if !strings.Contains(string(mustRead(t, filepath.Join(dest, ".agent-task.md"))), "AI_INIT_TEST_TOKEN") {
+	if !strings.Contains(primer, "AI_INIT_TEST_TOKEN") {
 		t.Fatal("task primer does not describe the explicit allowlist")
+	}
+	if !strings.Contains(output.String(), "ai-init does not isolate databases") || !strings.Contains(primer, "Do not migrate, reset, seed, drop") {
+		t.Fatal("database safety warning missing from output or task primer")
 	}
 	if _, err = git(dest, "check-ignore", "--", ".ai-init.env.json"); err != nil {
 		t.Fatalf("environment snapshot is not ignored: %v", err)
@@ -811,12 +816,13 @@ func TestWorktreeEnvironmentPropagationRequiresAllowlistAndStaysIgnored(t *testi
 func TestWorktreeEnvironmentDryRunDoesNotWriteOrPrintValues(t *testing.T) {
 	root, _ := integrationFixture(t, "env dry run")
 	t.Setenv("AI_INIT_TEST_DRY_SECRET", "dry run secret")
+	t.Setenv("DATABASE_URL", "postgres://task-user:dry-secret@localhost/shared")
 	t.Chdir(root)
 	var output bytes.Buffer
-	if err := worktrees([]string{"new", "env-preview", "--env", "AI_INIT_TEST_DRY_SECRET", "--dry-run"}, &output); err != nil {
+	if err := worktrees([]string{"new", "env-preview", "--env", "AI_INIT_TEST_DRY_SECRET", "--env", "DATABASE_URL", "--dry-run"}, &output); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(output.String(), "dry run secret") || !strings.Contains(output.String(), "AI_INIT_TEST_DRY_SECRET") {
+	if strings.Contains(output.String(), "dry run secret") || strings.Contains(output.String(), "dry-secret") || !strings.Contains(output.String(), "AI_INIT_TEST_DRY_SECRET") || !strings.Contains(output.String(), "ai-init does not isolate databases") {
 		t.Fatalf("unsafe or missing dry-run report: %s", output.String())
 	}
 	if branch, err := git(root, "branch", "--list", "agent/env-preview"); err != nil || branch != "" {

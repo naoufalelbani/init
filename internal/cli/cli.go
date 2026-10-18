@@ -1301,6 +1301,10 @@ func worktrees(args []string, w io.Writer) error {
 		if environmentErr != nil {
 			return environmentErr
 		}
+		databaseKeys := envprop.DatabaseConnectionKeys(orderedEnvironmentKeys)
+		if len(databaseKeys) > 0 {
+			fmt.Fprintf(w, "Warning: selected database-related variables (%s) may point to shared data services. ai-init does not isolate databases; do not run migrations, reset/seed/drop operations, or write shared data without explicit authorization.\n", strings.Join(databaseKeys, ", "))
+		}
 		branch := "agent/" + task
 		if existing, _ := git(root, "branch", "--list", branch); existing != "" {
 			return fmt.Errorf("branch already exists: %s", branch)
@@ -1458,6 +1462,9 @@ func worktrees(args []string, w io.Writer) error {
 		environmentInfo := "No environment variables were propagated. Do not copy `.env` files or secrets."
 		if len(orderedEnvironmentKeys) > 0 {
 			environmentInfo = fmt.Sprintf("An explicit allowlist was copied to ignored `.ai-init.env.json`: %s. Its values may be sensitive; load only what the task requires and never commit the file.", strings.Join(orderedEnvironmentKeys, ", "))
+		}
+		if len(databaseKeys) > 0 {
+			environmentInfo += fmt.Sprintf("\nDatabase safety: %s may contain shared database connections. ai-init does not isolate databases. Do not migrate, reset, seed, drop, or write shared data without explicit authorization; configure an isolated database and replace the task-local connection values before database-changing tests.", strings.Join(databaseKeys, ", "))
 		}
 		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: `AGENTS.md`\n- Architecture references: `README.md` and existing `docs/` files when present\n- Verification hints: %s\n\n## Port allocations\n%s\n## Environment\n%s\n\nDo not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch, joinOrUnknown(p.Tests), portInfo.String(), environmentInfo)
 		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
