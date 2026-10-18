@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	agentcfg "github.com/naoufalelbani/init/internal/agents"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
@@ -493,6 +494,30 @@ func removeTaskPrimerIgnore(path string) error {
 		kept = append(kept, lines[i])
 	}
 	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), info.Mode().Perm())
+}
+
+func acquireWorktreeCreationLock(root string) (func(), error) {
+	path, err := git(root, "rev-parse", "--git-path", "ai-init-worktree-create.lock")
+	if err != nil {
+		return nil, err
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(root, path)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err = os.Mkdir(path, 0700)
+		if err == nil {
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("acquire worktree creation lock: %w", err)
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for worktree creation lock %s; inspect active processes before removing it", path)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func writeFileSafe(path, content string, dry bool, w io.Writer) error {
@@ -1145,6 +1170,21 @@ func worktrees(args []string, w io.Writer) error {
 				fmt.Fprintf(w, "Would configure %s instructions; IDE launch is not configured\n", ide)
 			}
 			return nil
+		}
+		releaseCreationLock, lockErr := acquireWorktreeCreationLock(root)
+		if lockErr != nil {
+			return lockErr
+		}
+		defer releaseCreationLock()
+		if _, statErr := os.Lstat(dest); statErr == nil {
+			return fmt.Errorf("worktree path already exists: %s", dest)
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if existing, branchErr := git(root, "branch", "--list", branch); branchErr != nil {
+			return branchErr
+		} else if existing != "" {
+			return fmt.Errorf("branch already exists: %s", branch)
 		}
 		if err = os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 			return fmt.Errorf("create worktree parent: %w", err)

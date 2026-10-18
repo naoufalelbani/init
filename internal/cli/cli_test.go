@@ -2,12 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	portalloc "github.com/naoufalelbani/init/internal/ports"
@@ -556,6 +558,57 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	}
 	if string(ignore) != "# user's ignore rule\n*.local\n" {
 		t.Fatalf("rollback modified unrelated exclude content: %q", ignore)
+	}
+}
+
+func TestWorktreeCreationProcessHelper(t *testing.T) {
+	root := os.Getenv("AI_INIT_TEST_WORKTREE_ROOT")
+	if root == "" {
+		return
+	}
+	t.Chdir(root)
+	var output bytes.Buffer
+	task := os.Getenv("AI_INIT_TEST_WORKTREE_TASK")
+	parent := os.Getenv("AI_INIT_TEST_WORKTREE_PARENT")
+	if err := worktrees([]string{"new", task, "--worktree-parent", parent}, &output); err != nil {
+		t.Fatalf("create %s: %v\n%s", task, err, output.String())
+	}
+}
+
+func TestConcurrentWorktreeCreationUsesDistinctTasksSafely(t *testing.T) {
+	root, _ := integrationFixture(t, "parallel worktrees")
+	parent := filepath.Join(t.TempDir(), "parallel checkouts")
+	var group sync.WaitGroup
+	errs := make(chan error, 2)
+	for _, task := range []string{"first", "second"} {
+		group.Add(1)
+		go func(task string) {
+			defer group.Done()
+			cmd := exec.Command(os.Args[0], "-test.run=^TestWorktreeCreationProcessHelper$")
+			cmd.Dir = root
+			cmd.Env = append(os.Environ(), "AI_INIT_TEST_WORKTREE_ROOT="+root, "AI_INIT_TEST_WORKTREE_TASK="+task, "AI_INIT_TEST_WORKTREE_PARENT="+parent)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				errs <- fmt.Errorf("task %s: %w\n%s", task, err, output)
+				return
+			}
+			errs <- nil
+		}(task)
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, task := range []string{"first", "second"} {
+		if _, err := os.Stat(filepath.Join(parent, "parallel worktrees-worktrees", task, ".git")); err != nil {
+			t.Fatalf("worktree %s not created: %v", task, err)
+		}
+		branch, err := git(filepath.Join(parent, "parallel worktrees-worktrees", task), "branch", "--show-current")
+		if err != nil || branch != "agent/"+task {
+			t.Fatalf("task %s branch=%q err=%v", task, branch, err)
+		}
 	}
 }
 
