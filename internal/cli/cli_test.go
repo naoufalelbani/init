@@ -514,7 +514,7 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nfunc main() {}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".aider.conf.yml"), []byte("# ai-init managed instructions\n# <ai-init adapter:begin>\ntruncated\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".aider.conf.yml"), []byte("# <!-- ai-init adapter:begin -->\ntruncated\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	gitExclude := runGitTest(t, root, "rev-parse", "--git-path", "info/exclude")
