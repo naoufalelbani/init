@@ -16,4 +16,6 @@ jobs:
       - run: gofmt -w cmd/ai-init internal/cli internal/agents internal/ports
       - run: git diff --exit-code
       - run: go vet ./...
+      - run: go test ./internal/agents ./internal/ports
+      - run: go test ./internal/cli -run 'TestIntegrate|TestWorktree|TestSetup|TestRunValidation' -count=1
       - run: go test ./...

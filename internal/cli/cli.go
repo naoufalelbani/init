@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -280,22 +281,22 @@ func analyze(root string) project {
 		}
 	}
 	if names["pom.xml"] {
-		if names["mvnw"] {
-			p.Build = append(p.Build, "./mvnw package")
-			p.Tests = append(p.Tests, "./mvnw test")
-		} else if names["mvnw.cmd"] {
+		if runtime.GOOS == "windows" && names["mvnw.cmd"] {
 			p.Build = append(p.Build, "mvnw.cmd package")
 			p.Tests = append(p.Tests, "mvnw.cmd test")
+		} else if names["mvnw"] {
+			p.Build = append(p.Build, "./mvnw package")
+			p.Tests = append(p.Tests, "./mvnw test")
 		} else {
 			p.Build = append(p.Build, "mvn package")
 			p.Tests = append(p.Tests, "mvn test")
 		}
 	}
 	if names["build.gradle"] || names["build.gradle.kts"] {
-		if names["gradlew"] {
-			p.Tests = append(p.Tests, "./gradlew test")
-		} else if names["gradlew.bat"] {
+		if runtime.GOOS == "windows" && names["gradlew.bat"] {
 			p.Tests = append(p.Tests, "gradlew.bat test")
+		} else if names["gradlew"] {
+			p.Tests = append(p.Tests, "./gradlew test")
 		} else {
 			p.Tests = append(p.Tests, "gradle test")
 		}
@@ -386,8 +387,6 @@ func setup(args []string, w io.Writer) error {
 	if !pathSpecified(args) {
 		root = discoverRoot(root)
 	}
-	p := analyze(root)
-	printProject(w, root, p)
 	selected := map[string]bool{}
 	for _, v := range strings.Split(*with, ",") {
 		name := strings.TrimSpace(v)
@@ -404,6 +403,8 @@ func setup(args []string, w io.Writer) error {
 	if len(splitList(*adapters)) > 0 && !selected["agents"] {
 		return errors.New("--adapters requires the agents component in --with")
 	}
+	p := analyze(root)
+	printProject(w, root, p)
 	fmt.Fprintln(w, "\nSetup:")
 	if selected["agents"] {
 		if e := writeAgents(root, p, *dry, w); e != nil {
@@ -449,6 +450,51 @@ func splitList(value string) []string {
 	}
 	return out
 }
+
+// runValidationCommand runs only statically generated test commands from analyze.
+// Windows validation tools often resolve through .cmd wrappers, so use cmd.exe there.
+func runValidationCommand(dir, command string, stdout, stderr io.Writer) error {
+	parts := strings.Fields(command)
+	if len(parts) == 0 {
+		return errors.New("empty validation command")
+	}
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		args := append([]string{"/d", "/c", "call"}, parts...)
+		cmd = exec.Command("cmd.exe", args...)
+	} else {
+		cmd = exec.Command(parts[0], parts[1:]...)
+	}
+	cmd.Dir = dir
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+func removeTaskPrimerIgnore(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	kept := lines[:0]
+	for i := 0; i < len(lines); i++ {
+		if strings.TrimSuffix(lines[i], "\r") == "# ai-init task-local primer" && i+1 < len(lines) && strings.TrimSuffix(lines[i+1], "\r") == ".agent-task.md" {
+			i++
+			continue
+		}
+		kept = append(kept, lines[i])
+	}
+	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), info.Mode().Perm())
+}
+
 func writeFileSafe(path, content string, dry bool, w io.Writer) error {
 	old, e := os.ReadFile(path)
 	if e == nil && bytes.Equal(old, []byte(content)) {
@@ -828,8 +874,10 @@ func git(root string, args ...string) (string, error) {
 }
 
 func validTaskName(task string) bool {
-	return task != "" && task != "." && task != ".." && filepath.Base(task) == task && !strings.ContainsAny(task, "/\\")
+	return taskNamePattern.MatchString(task)
 }
+
+var taskNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func integrate(root, sourceWorktree, task string, out io.Writer, dry bool) error {
 	clean, err := git(root, "status", "--porcelain")
@@ -917,16 +965,8 @@ func integrate(root, sourceWorktree, task string, out io.Writer, dry bool) error
 		if test == "unknown (pyproject.toml detected)" {
 			continue
 		}
-		parts := strings.Fields(test)
-		if len(parts) == 0 {
-			continue
-		}
 		fmt.Fprintf(out, "Running combined-result validation: %s\n", test)
-		cmd := exec.Command(parts[0], parts[1:]...)
-		cmd.Dir = temp
-		cmd.Stdout = out
-		cmd.Stderr = out
-		if err = cmd.Run(); err != nil {
+		if err = runValidationCommand(temp, test, out, out); err != nil {
 			return fmt.Errorf("combined-result validation failed in disposable worktree; target was not changed: %w", err)
 		}
 	}
@@ -1039,7 +1079,20 @@ func worktrees(args []string, w io.Writer) error {
 		if !validTaskName(task) {
 			return errors.New("task name must be a single directory name")
 		}
-		dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
+		parent := ""
+		for i := 2; i < len(args); i++ {
+			if args[i] == "--worktree-parent" {
+				if i+1 >= len(args) {
+					return errors.New("--worktree-parent requires a directory")
+				}
+				parent = args[i+1]
+				i++
+			}
+		}
+		if parent == "" {
+			parent = filepath.Dir(root)
+		}
+		dest := filepath.Join(parent, filepath.Base(root)+"-worktrees", task)
 		if _, err := os.Stat(dest); err == nil {
 			return fmt.Errorf("worktree path already exists: %s", dest)
 		}
@@ -1062,6 +1115,11 @@ func worktrees(args []string, w io.Writer) error {
 				services = append(services, args[i])
 			case "--dry-run":
 				dry = true
+			case "--worktree-parent":
+				if i+1 >= len(args) {
+					return errors.New("--worktree-parent requires a directory")
+				}
+				i++
 			default:
 				return fmt.Errorf("unknown wt new option %q", args[i])
 			}
@@ -1069,11 +1127,12 @@ func worktrees(args []string, w io.Writer) error {
 		if ide != "" && !slices.Contains(agentcfg.Names(), strings.ToLower(ide)) {
 			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
 		}
+		ide = strings.ToLower(ide)
+		branch := "agent/" + task
+		if existing, _ := git(root, "branch", "--list", branch); existing != "" {
+			return fmt.Errorf("branch already exists: %s", branch)
+		}
 		if dry {
-			branch := "agent/" + task
-			if existing, _ := git(root, "branch", "--list", branch); existing != "" {
-				return fmt.Errorf("branch already exists: %s", branch)
-			}
 			for _, service := range services {
 				port, previewErr := portalloc.Preview(root, task, service)
 				if previewErr != nil {
@@ -1086,6 +1145,9 @@ func worktrees(args []string, w io.Writer) error {
 				fmt.Fprintf(w, "Would configure %s instructions; IDE launch is not configured\n", ide)
 			}
 			return nil
+		}
+		if err = os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return fmt.Errorf("create worktree parent: %w", err)
 		}
 		registryBefore, err := portalloc.List(root)
 		if err != nil {
@@ -1107,13 +1169,43 @@ func worktrees(args []string, w io.Writer) error {
 				newlyAllocated = append(newlyAllocated, service)
 			}
 		}
-		branch := "agent/" + task
 		if _, err = git(root, "worktree", "add", "-b", branch, dest); err != nil {
 			for _, created := range newlyAllocated {
 				_ = portalloc.ReleaseService(root, task, created)
 			}
 			return err
 		}
+		worktreeCreated := true
+		committed := false
+		exclude := ""
+		excludeEntryAdded := false
+		defer func() {
+			if committed {
+				return
+			}
+			if worktreeCreated {
+				if _, cleanupErr := git(root, "worktree", "remove", "--force", dest); cleanupErr != nil {
+					fmt.Fprintf(w, "Recovery needed: remove failed worktree %s manually: %v\n", dest, cleanupErr)
+				} else {
+					worktreeCreated = false
+				}
+			}
+			if !worktreeCreated {
+				if _, cleanupErr := git(root, "branch", "-D", branch); cleanupErr != nil {
+					fmt.Fprintf(w, "Recovery needed: delete failed task branch %s manually: %v\n", branch, cleanupErr)
+				}
+			}
+			for _, created := range newlyAllocated {
+				if cleanupErr := portalloc.ReleaseService(root, task, created); cleanupErr != nil {
+					fmt.Fprintf(w, "Recovery needed: release port allocation %s/%s manually: %v\n", task, created, cleanupErr)
+				}
+			}
+			if excludeEntryAdded && exclude != "" {
+				if cleanupErr := removeTaskPrimerIgnore(exclude); cleanupErr != nil {
+					fmt.Fprintf(w, "Recovery needed: remove ai-init task primer ignore entry from %s manually: %v\n", exclude, cleanupErr)
+				}
+			}
+		}()
 		if ide != "" {
 			if err = writeAgents(dest, analyze(dest), false, w); err != nil {
 				return fmt.Errorf("worktree created but canonical instructions could not be prepared: %w", err)
@@ -1123,7 +1215,7 @@ func worktrees(args []string, w io.Writer) error {
 			}
 			fmt.Fprintln(w, "IDE launch is not configured; open the workspace path above in the selected tool.")
 		}
-		exclude, err := git(root, "rev-parse", "--git-path", "info/exclude")
+		exclude, err = git(root, "rev-parse", "--git-path", "info/exclude")
 		if err != nil {
 			return err
 		}
@@ -1150,6 +1242,7 @@ func worktrees(args []string, w io.Writer) error {
 			if closeErr != nil {
 				return closeErr
 			}
+			excludeEntryAdded = true
 		}
 		p := analyze(dest)
 		var portInfo strings.Builder
@@ -1164,6 +1257,7 @@ func worktrees(args []string, w io.Writer) error {
 		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
 			return fmt.Errorf("worktree created but task primer failed: %w", err)
 		}
+		committed = true
 		fmt.Fprintf(w, "Created %s on branch %s\n", dest, branch)
 		return nil
 	}

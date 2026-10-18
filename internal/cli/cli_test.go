@@ -5,9 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
 func TestAnalyzeGoProject(t *testing.T) {
@@ -402,6 +405,45 @@ func TestSetupEmptyUnicodeProjectIsIdempotent(t *testing.T) {
 		t.Fatal("setup was not idempotent")
 	}
 }
+
+func TestSetupEmptyRepositoryCreatesInstructionsAndContext(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "empty repository")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"AGENTS.md", filepath.Join(".ai", "PROJECT_MAP.md"), filepath.Join(".ai", "DECISIONS.md")} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Fatalf("missing generated artifact %s: %v", path, err)
+		}
+	}
+	if !strings.Contains(output.String(), "Stack: unknown") || !strings.Contains(output.String(), "Validation: completed") {
+		t.Fatalf("unexpected setup summary: %s", output.String())
+	}
+}
+
+func TestSetupRejectsInvalidOptionsBeforeWriting(t *testing.T) {
+	for _, args := range [][]string{
+		{"setup", "--path", t.TempDir(), "--with", "agents,unknown"},
+		{"setup", "--path", t.TempDir(), "--adapters", "unknown"},
+	} {
+		root := args[2]
+		var output bytes.Buffer
+		if err := Run(args, &output, &output); err == nil {
+			t.Fatalf("expected invalid option error for %v", args)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("invalid options wrote files into %s: %v", root, entries)
+		}
+	}
+}
 func TestSetupPreservesExistingProjectInstructions(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "AGENTS.md")
@@ -455,6 +497,91 @@ func TestAnalyzeTypeScriptReactProject(t *testing.T) {
 	}
 	if !contains(p.EntryPoints, "src/main.ts") {
 		t.Fatalf("entrypoints=%v", p.EntryPoints)
+	}
+}
+
+func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "init", "-b", "main")
+	runGitTest(t, root, "config", "user.name", "ai-init test")
+	runGitTest(t, root, "config", "user.email", "ai-init@example.invalid")
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/rollback\n\ngo 1.23\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitExclude := runGitTest(t, root, "rev-parse", "--git-path", "info/exclude")
+	if !filepath.IsAbs(gitExclude) {
+		gitExclude = filepath.Join(root, gitExclude)
+	}
+	if err := os.MkdirAll(filepath.Dir(gitExclude), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitExclude, []byte("# user's ignore rule\n*.local\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", ".")
+	runGitTest(t, root, "commit", "-m", "base")
+	destinationParent := filepath.Join(t.TempDir(), "worktree parent")
+	if err := os.WriteFile(filepath.Join(root, ".aider.conf.yml"), []byte("# ai-init managed instructions\n# <ai-init adapter:begin>\ntruncated\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	err := worktrees([]string{"new", "rollback", "--ide", "aider", "--port", "api", "--worktree-parent", destinationParent}, &output)
+	if err == nil {
+		t.Fatal("expected adapter error")
+	}
+	if value, gitErr := git(root, "branch", "--list", "agent/rollback"); gitErr != nil || value != "" {
+		t.Fatalf("failed branch remains: %q (%v)", value, gitErr)
+	}
+	dest := filepath.Join(destinationParent, "repo-worktrees", "rollback")
+	if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+		t.Fatalf("failed worktree remains: %v", statErr)
+	}
+	registry, listErr := portalloc.List(root)
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	if len(registry.Allocations["rollback"]) != 0 {
+		t.Fatalf("failed creation leaked ports: %v", registry.Allocations)
+	}
+	ignore, err := os.ReadFile(gitExclude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(ignore) != "# user's ignore rule\n*.local\n" {
+		t.Fatalf("rollback modified unrelated exclude content: %q", ignore)
+	}
+}
+
+func TestRunValidationCommandExecutesGoTests(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.test/validate\n\ngo 1.23\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "validate.go"), []byte("package validate\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := runValidationCommand(dir, "go test ./...", &output, &output); err != nil {
+		t.Fatalf("validation command failed: %v\n%s", err, output.String())
+	}
+}
+
+func TestRunValidationCommandExecutesWindowsWrapperWhenAvailable(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows command wrapper execution is platform-specific")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "test.cmd"), []byte("@echo off\r\nexit /b 0\r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runValidationCommand(dir, "test.cmd", &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
 	}
 }
 
