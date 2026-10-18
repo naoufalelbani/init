@@ -13,6 +13,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
+          cache-dependency-path: go.mod
       - run: gofmt -w cmd/ai-init internal/cli internal/agents internal/environment internal/ports
       - run: git diff --exit-code
       - run: go vet ./...
