@@ -251,7 +251,7 @@ func integrationFixture(t *testing.T, name string) (string, string) {
 	}
 	runGitTest(t, root, "add", ".")
 	runGitTest(t, root, "commit", "-m", "base")
-	source := filepath.Join(parent, name+"-worktree")
+	source := filepath.Join(parent, filepath.Base(root)+"-worktrees", "feature")
 	runGitTest(t, root, "worktree", "add", "-b", "agent/feature", source)
 	return root, source
 }
@@ -721,6 +721,42 @@ func TestIntegrateDryRunValidatesWithoutChangingBranches(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Validation passed; would integrate") {
 		t.Fatalf("missing dry-run report: %s", output.String())
+	}
+}
+
+func TestWorktreeSyncDryRunChecksMergeWithoutChangingBranches(t *testing.T) {
+	root, source := integrationFixture(t, "sync preview")
+	if err := os.WriteFile(filepath.Join(root, "target-only.txt"), []byte("target update\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "target-only.txt")
+	runGitTest(t, root, "commit", "-m", "target update")
+	targetBefore, _ := git(root, "rev-parse", "HEAD")
+	sourceBefore, _ := git(source, "rev-parse", "HEAD")
+	t.Chdir(root)
+	var output bytes.Buffer
+	if err := worktrees([]string{"sync", "feature", "--dry-run"}, &output); err != nil {
+		t.Fatalf("sync dry-run failed: %v\n%s", err, output.String())
+	}
+	targetAfter, _ := git(root, "rev-parse", "HEAD")
+	sourceAfter, _ := git(source, "rev-parse", "HEAD")
+	if targetAfter != targetBefore || sourceAfter != sourceBefore {
+		t.Fatal("sync dry-run changed an original branch")
+	}
+	if _, err := os.Stat(filepath.Join(source, "target-only.txt")); !os.IsNotExist(err) {
+		t.Fatalf("sync dry-run changed task worktree: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".ai-init-sync-") {
+			t.Fatalf("disposable preview remains: %s", entry.Name())
+		}
+	}
+	if !strings.Contains(output.String(), "Sync preview passed") {
+		t.Fatalf("preview result missing: %s", output.String())
 	}
 }
 

@@ -1118,6 +1118,32 @@ func integrate(root, sourceWorktree, task string, out io.Writer, dry bool) error
 	}
 	return nil
 }
+
+func previewSync(root, taskWorktree, targetBranch string, out io.Writer) error {
+	taskHead, err := git(taskWorktree, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(root)
+	temp := filepath.Join(parent, fmt.Sprintf(".ai-init-sync-%s-%d-%d", filepath.Base(root), os.Getpid(), time.Now().UnixNano()))
+	if _, err = git(root, "worktree", "add", "--detach", temp, taskHead); err != nil {
+		return fmt.Errorf("create disposable sync preview: %w", err)
+	}
+	defer func() {
+		if _, abortErr := git(temp, "merge", "--abort"); abortErr != nil {
+			// No merge may have started, or it may already be up to date.
+		}
+		if _, removeErr := git(root, "worktree", "remove", "--force", temp); removeErr != nil {
+			fmt.Fprintf(out, "Recovery needed: remove disposable sync preview %s manually: %v\n", temp, removeErr)
+		}
+	}()
+	if _, err = git(temp, "merge", "--no-commit", "--no-ff", targetBranch); err != nil {
+		return fmt.Errorf("sync preview found a conflict; task and target branches are unchanged: %w", err)
+	}
+	fmt.Fprintf(out, "Sync preview passed; %s can merge into the task worktree without conflicts\n", targetBranch)
+	return nil
+}
+
 func worktrees(args []string, w io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("usage: ai-init wt new|list|status|sync|integrate|cleanup [task]")
@@ -1385,6 +1411,14 @@ func worktrees(args []string, w io.Writer) error {
 		fmt.Fprintln(w, value)
 		return nil
 	case "sync":
+		dry := false
+		for _, option := range args[2:] {
+			if option == "--dry-run" {
+				dry = true
+			} else {
+				return fmt.Errorf("unknown wt sync option %q", option)
+			}
+		}
 		status, err := git(dest, "status", "--porcelain")
 		if err != nil {
 			return err
@@ -1395,6 +1429,9 @@ func worktrees(args []string, w io.Writer) error {
 		branch, err := git(root, "branch", "--show-current")
 		if err != nil {
 			return err
+		}
+		if dry {
+			return previewSync(root, dest, branch, w)
 		}
 		if _, err = git(dest, "merge", "--no-edit", branch); err != nil {
 			return fmt.Errorf("sync failed; resolve conflicts in the task worktree: %w", err)

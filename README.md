@@ -49,7 +49,7 @@ ai-init memory update
 - `agents generate|audit|sync|validate|configure|list`: create managed instructions, configure adapters, or inspect support. Custom files are preserved.
 - `memory generate|update`: write `.ai/PROJECT_MAP.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CURRENT_STATE.md`, and `DECISIONS.md` from detected evidence. Managed sections refresh while manual text outside those markers is retained.
 - `wt new <task> [--ide ADAPTER] [--port SERVICE]`: create an `agent/<task>` branch in a sibling worktree directory and optionally configure instructions/allocate ports. Creation serializes concurrent ai-init processes; failed setup rolls back the newly created branch, worktree, ignore entry, and port allocations. IDE windows are not launched automatically yet.
-- `wt list|status [task]|sync <task>|integrate <task>|cleanup <task>`: inspect, sync, test and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch.
+- `wt list|status [task]|sync <task> [--dry-run]|integrate <task> [--dry-run]|cleanup <task> [--dry-run]`: inspect, preview or sync, validate and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch.
 - `ports allocate|list|release`: manage explicit, per-task service port records.
 - `prompt agents|worktrees|audit|config`: display a reusable prompt or export it with `--output FILE` (existing files are never overwritten).
 - `doctor`, `version`, `help`.
