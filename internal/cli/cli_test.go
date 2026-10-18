@@ -130,6 +130,75 @@ func TestWriteManagedAgentsIdempotent(t *testing.T) {
 		t.Fatalf("output=%q", out.String())
 	}
 }
+
+func TestAgentDiffShowsManagedUpdateWithoutWriting(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/diff\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := writeAgents(root, analyze(root), false, &output); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "AGENTS.md")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"dependencies":{"react":"^19"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err = Run([]string{"agents", "generate", "--path", root, "--diff"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "--- a/AGENTS.md") || !strings.Contains(output.String(), "+- Detected frameworks: Node.js, react") {
+		t.Fatalf("diff missing expected managed update: %s", output.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("diff mode modified AGENTS.md")
+	}
+}
+
+func TestAgentDiffPreservesCustomInstructionsWithoutSuggestingReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "AGENTS.md")
+	want := "# owner rules\nKeep these instructions.\n"
+	if err := os.WriteFile(path, []byte(want), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"agents", "sync", "--path", root, "--diff"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "custom instructions") || strings.Contains(output.String(), "--- a/AGENTS.md") {
+		t.Fatalf("custom file should be reported preserved without replacement diff: %s", output.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != want {
+		t.Fatalf("custom instructions changed: %q err=%v", got, err)
+	}
+}
+
+func TestSetupDiffPreviewsWithoutCreatingFiles(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--diff"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "--- /dev/null") || !strings.Contains(output.String(), "Validation: skipped") {
+		t.Fatalf("setup diff report incomplete: %s", output.String())
+	}
+	for _, path := range []string{"AGENTS.md", ".ai", ".ai-init"} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("diff mode created %s: %v", path, err)
+		}
+	}
+}
 func TestDryRunDoesNotCreate(t *testing.T) {
 	root := t.TempDir()
 	var out bytes.Buffer

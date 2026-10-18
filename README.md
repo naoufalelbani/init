@@ -35,9 +35,11 @@ ai-init doctor
 
 ```sh
 ai-init setup --path "../my project" --dry-run
+ai-init setup --diff
 ai-init setup --with agents,memory,worktrees
 ai-init setup --adapters claude,cursor,copilot,aider
 ai-init agents audit
+ai-init agents sync --diff
 ai-init agents list
 ai-init memory update
 ```

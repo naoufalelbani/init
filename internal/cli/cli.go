@@ -72,9 +72,9 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `ai-init initializes AI-assisted development environments.
 
 Usage:
-  ai-init setup [--path DIR] [--dry-run] [--with agents,worktrees,memory]
+  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory]
   ai-init analyze [--path DIR]
-  ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME]
+  ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME] [--diff]
   ai-init memory generate|update [--path DIR]
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
   ai-init wt new|list|status|sync|integrate|cleanup [TASK]
@@ -375,11 +375,15 @@ func setup(args []string, w io.Writer) error {
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", ".", "project path")
 	dry := fs.Bool("dry-run", false, "preview without writing")
+	diff := fs.Bool("diff", false, "show AGENTS.md changes without writing")
 	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory")
 	adapters := fs.String("adapters", "", "comma-separated agent adapters; empty detects existing configuration")
 	verbose := fs.Bool("verbose", false, "show details")
 	if e := fs.Parse(args); e != nil {
 		return e
+	}
+	if *diff {
+		*dry = true
 	}
 	root, e := filepath.Abs(*path)
 	if e != nil {
@@ -408,8 +412,14 @@ func setup(args []string, w io.Writer) error {
 	printProject(w, root, p)
 	fmt.Fprintln(w, "\nSetup:")
 	if selected["agents"] {
-		if e := writeAgents(root, p, *dry, w); e != nil {
-			return e
+		var writeErr error
+		if *diff {
+			writeErr = writeAgentsDiff(root, p, w)
+		} else {
+			writeErr = writeAgents(root, p, *dry, w)
+		}
+		if writeErr != nil {
+			return writeErr
 		}
 		var adapterReport bytes.Buffer
 		if e := agentcfg.Configure(root, splitList(*adapters), *dry, &adapterReport); e != nil {
@@ -577,7 +587,7 @@ func agentsTemplate(p project) string {
 	)
 	return replacer.Replace(string(template))
 }
-func writeAgents(root string, p project, dry bool, w io.Writer) error {
+func plannedAgentsContent(root string, p project) (old, updated []byte, preserved bool, err error) {
 	path := filepath.Join(root, "AGENTS.md")
 	existing, err := os.ReadFile(path)
 	start, end := "<!-- ai-init:begin -->", "<!-- ai-init:end -->"
@@ -587,23 +597,116 @@ func writeAgents(root string, p project, dry bool, w io.Writer) error {
 		finishMarker := strings.Index(text, end)
 		if begin >= 0 || finishMarker >= 0 {
 			if begin < 0 || finishMarker < 0 || finishMarker < begin || strings.Count(text, start) != 1 || strings.Count(text, end) != 1 {
-				return errors.New("managed AGENTS.md markers are incomplete or out of order; preserving file")
+				return nil, nil, false, errors.New("managed AGENTS.md markers are incomplete or out of order; preserving file")
 			}
 			relativeEnd := strings.Index(text[begin:], end)
 			if relativeEnd < 0 {
-				return errors.New("managed AGENTS.md block has no end marker; preserving file")
+				return nil, nil, false, errors.New("managed AGENTS.md block has no end marker; preserving file")
 			}
 			finish := begin + relativeEnd + len(end)
 			updated := text[:begin] + start + "\n" + agentsTemplate(p) + "\n" + end + text[finish:]
-			return writeFileSafe(path, updated, dry, w)
+			return existing, []byte(updated), false, nil
 		}
+		return existing, existing, true, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, nil, false, err
+	}
+	return nil, []byte(start + "\n" + agentsTemplate(p) + "\n" + end + "\n"), false, nil
+}
+
+func writeAgents(root string, p project, dry bool, w io.Writer) error {
+	path := filepath.Join(root, "AGENTS.md")
+	old, updated, preserved, err := plannedAgentsContent(root, p)
+	if err != nil {
+		return err
+	}
+	if preserved {
 		fmt.Fprintf(w, "  preserved %s (custom instructions detected; use agents sync to inspect)\n", path)
 		return nil
 	}
-	if !os.IsNotExist(err) {
+	if old != nil && bytes.Equal(old, updated) {
+		fmt.Fprintf(w, "  preserved %s (already current)\n", path)
+		return nil
+	}
+	return writeFileSafe(path, string(updated), dry, w)
+}
+
+func writeAgentsDiff(root string, p project, w io.Writer) error {
+	path := filepath.Join(root, "AGENTS.md")
+	old, updated, preserved, err := plannedAgentsContent(root, p)
+	if err != nil {
 		return err
 	}
-	return writeFileSafe(path, start+"\n"+agentsTemplate(p)+"\n"+end+"\n", dry, w)
+	if preserved {
+		fmt.Fprintf(w, "No AGENTS.md changes proposed; custom instructions at %s are preserved.\n", path)
+		return nil
+	}
+	if bytes.Equal(old, updated) {
+		fmt.Fprintf(w, "No AGENTS.md changes; %s is already current.\n", path)
+		return nil
+	}
+	writeUnifiedDiff(w, "AGENTS.md", old, updated)
+	return nil
+}
+
+func diffLines(data []byte) []string {
+	if len(data) == 0 {
+		return nil
+	}
+	return strings.SplitAfter(string(data), "\n")
+}
+
+func writeUnifiedDiff(w io.Writer, name string, oldData, newData []byte) {
+	oldLines, newLines := diffLines(oldData), diffLines(newData)
+	prefix := 0
+	for prefix < len(oldLines) && prefix < len(newLines) && oldLines[prefix] == newLines[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(oldLines)-prefix && suffix < len(newLines)-prefix && oldLines[len(oldLines)-1-suffix] == newLines[len(newLines)-1-suffix] {
+		suffix++
+	}
+	oldEnd, newEnd := len(oldLines)-suffix, len(newLines)-suffix
+	contextStart := prefix - 3
+	if contextStart < 0 {
+		contextStart = 0
+	}
+	oldContextEnd, newContextEnd := oldEnd+3, newEnd+3
+	if oldContextEnd > len(oldLines) {
+		oldContextEnd = len(oldLines)
+	}
+	if newContextEnd > len(newLines) {
+		newContextEnd = len(newLines)
+	}
+	oldCount, newCount := oldContextEnd-contextStart, newContextEnd-contextStart
+	oldStart, newStart := contextStart+1, contextStart+1
+	if oldCount == 0 {
+		oldStart = contextStart
+	}
+	if newCount == 0 {
+		newStart = contextStart
+	}
+	oldName, newName := "a/"+name, "b/"+name
+	if oldData == nil {
+		oldName = "/dev/null"
+	}
+	if newData == nil {
+		newName = "/dev/null"
+	}
+	fmt.Fprintf(w, "--- %s\n+++ %s\n@@ -%d,%d +%d,%d @@\n", oldName, newName, oldStart, oldCount, newStart, newCount)
+	for _, line := range oldLines[contextStart:prefix] {
+		fmt.Fprintf(w, " %s\n", strings.TrimRight(line, "\r\n"))
+	}
+	for _, line := range oldLines[prefix:oldEnd] {
+		fmt.Fprintf(w, "-%s\n", strings.TrimRight(line, "\r\n"))
+	}
+	for _, line := range newLines[prefix:newEnd] {
+		fmt.Fprintf(w, "+%s\n", strings.TrimRight(line, "\r\n"))
+	}
+	for _, line := range oldLines[oldEnd:oldContextEnd] {
+		fmt.Fprintf(w, " %s\n", strings.TrimRight(line, "\r\n"))
+	}
 }
 
 func auditAgentsFile(path string) (string, error) {
@@ -766,8 +869,12 @@ func agents(args []string, w io.Writer) error {
 		fs.SetOutput(io.Discard)
 		path := fs.String("path", ".", "project path")
 		dry := fs.Bool("dry-run", false, "preview without writing")
+		diff := fs.Bool("diff", false, "show AGENTS.md changes without writing")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
+		}
+		if *diff {
+			*dry = true
 		}
 		root, err := filepath.Abs(*path)
 		if err != nil {
@@ -776,7 +883,11 @@ func agents(args []string, w io.Writer) error {
 		if !pathSpecified(args[1:]) {
 			root = discoverRoot(root)
 		}
-		return writeAgents(root, analyze(root), *dry, w)
+		project := analyze(root)
+		if *diff {
+			return writeAgentsDiff(root, project, w)
+		}
+		return writeAgents(root, project, *dry, w)
 	}
 	root, _, e := target(args[1:])
 	if e != nil {
