@@ -530,6 +530,7 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	runGitTest(t, root, "add", ".")
 	runGitTest(t, root, "commit", "-m", "base")
 	destinationParent := filepath.Join(t.TempDir(), "worktree parent")
+	t.Chdir(root)
 	var output bytes.Buffer
 	err := worktrees([]string{"new", "rollback", "--ide", "aider", "--port", "api", "--worktree-parent", destinationParent}, &output)
 	if err == nil {
