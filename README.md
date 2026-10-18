@@ -8,7 +8,7 @@ The Go CLI, deterministic project analysis, managed `AGENTS.md` generation, docu
 
 ## Install
 
-Requires Go 1.26+ to build. Prebuilt releases are published through GitHub Releases when a version tag is pushed.
+Prebuilt archives for Linux, macOS, and Windows (amd64 and arm64) are published by the release workflow when a `v*` version tag is pushed. Download the archive for your OS and architecture from [GitHub Releases](https://github.com/naoufalelbani/init/releases); the release includes `checksums.txt` for artifact verification. No Go installation is needed to use a downloaded binary. No versioned release has been tagged yet.
 
 ```sh
 go install github.com/naoufalelbani/init/cmd/ai-init@latest

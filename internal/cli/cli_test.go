@@ -829,6 +829,45 @@ func TestWorktreeSyncDryRunChecksMergeWithoutChangingBranches(t *testing.T) {
 	}
 }
 
+func TestWorktreeSyncDryRunConflictLeavesBothBranchesUntouched(t *testing.T) {
+	root, source := integrationFixture(t, "sync conflict preview")
+	if err := os.WriteFile(filepath.Join(root, "value.go"), []byte("package sample\n\nfunc Value() int { return 3 }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "value.go")
+	runGitTest(t, root, "commit", "-m", "target conflicting edit")
+	if err := os.WriteFile(filepath.Join(source, "value.go"), []byte("package sample\n\nfunc Value() int { return 4 }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, source, "add", "value.go")
+	runGitTest(t, source, "commit", "-m", "task conflicting edit")
+	targetBefore, _ := git(root, "rev-parse", "HEAD")
+	sourceBefore, _ := git(source, "rev-parse", "HEAD")
+	t.Chdir(root)
+	var output bytes.Buffer
+	if err := worktrees([]string{"sync", "feature", "--dry-run"}, &output); err == nil {
+		t.Fatal("expected sync conflict")
+	}
+	targetAfter, _ := git(root, "rev-parse", "HEAD")
+	sourceAfter, _ := git(source, "rev-parse", "HEAD")
+	if targetAfter != targetBefore || sourceAfter != sourceBefore {
+		t.Fatal("conflicting sync preview changed an original branch")
+	}
+	status, err := git(source, "status", "--porcelain")
+	if err != nil || status != "" {
+		t.Fatalf("conflicting preview dirtied task worktree: %q err=%v", status, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".ai-init-sync-") {
+			t.Fatalf("conflicting preview left disposable worktree: %s", entry.Name())
+		}
+	}
+}
+
 func TestEmbeddedPromptAssetsMatchStandaloneFiles(t *testing.T) {
 	for _, name := range []string{"generate-agents.md", "setup-worktrees.md", "audit-project.md", "improve-existing-config.md"} {
 		embedded, err := promptFiles.ReadFile("prompts/" + name)
