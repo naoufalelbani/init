@@ -66,8 +66,12 @@ These rules apply to every task in this repository. Project facts appear at the 
 - Project: {{PROJECT_NAME}}
 - Detected languages: {{LANGUAGES}}
 - Detected frameworks: {{FRAMEWORKS}}
+- Detected dependency managers: {{DEPENDENCY_MANAGERS}}
 - Source directories: {{SOURCES}}
 - Entry points: {{ENTRY_POINTS}}
+- Existing agent instruction files: {{AGENT_INSTRUCTIONS}}
+- Formatting and lint configuration files: {{PROJECT_CONFIGURATIONS}}
+- Platform and deployment evidence: {{PLATFORM_REQUIREMENTS}}
 - Git repository: {{GIT}}
 - Build commands: {{BUILD_COMMANDS}}
 - Test commands: {{TEST_COMMANDS}}

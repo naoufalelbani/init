@@ -35,7 +35,7 @@ func TestAnalyzeGoProjectFacts(t *testing.T) {
 
 func TestAnalyzeTypeScriptReactPackageManagerCommands(t *testing.T) {
 	root := t.TempDir()
-	manifest := `{"scripts":{"build":"vite build","test":"vitest"},"dependencies":{"react":"^19.0.0","vite":"^6.0.0"}}`
+	manifest := `{"packageManager":"pnpm@10.0.0","scripts":{"build":"vite build","test":"vitest"},"dependencies":{"react":"^19.0.0","vite":"^6.0.0"}}`
 	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte(manifest), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -61,6 +61,73 @@ func TestAnalyzeTypeScriptReactPackageManagerCommands(t *testing.T) {
 	}
 	if !slices.Contains(project.Build, "pnpm run build") || !slices.Contains(project.Tests, "pnpm test") {
 		t.Fatalf("package manager commands not detected: build=%v tests=%v", project.Build, project.Tests)
+	}
+	if !slices.Contains(project.DependencyManagers, "pnpm") || !slices.Contains(project.DependencyManagers, "pnpm (packageManager field)") {
+		t.Fatalf("dependency manager not detected: %v", project.DependencyManagers)
+	}
+}
+
+func TestAnalyzeExistingProjectConfigurationEvidence(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		".prettierrc.json", ".gitignore", "AGENTS.md", "Dockerfile", ".serena/project.yml",
+		".cursor/rules/project.mdc", ".github/copilot-instructions.md", ".github/workflows/ci.yml",
+	} {
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte("evidence\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project, err := Analyze(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for field, values := range map[string][]string{
+		"configuration":         project.Configurations,
+		"agent instructions":    project.AgentInstructions,
+		"indexer":               project.Indexers,
+		"Git conventions":       project.GitConventions,
+		"platform requirements": project.PlatformRequirements,
+	} {
+		if len(values) == 0 {
+			t.Errorf("%s evidence was not detected", field)
+		}
+	}
+	for _, path := range []string{".cursor/rules/project.mdc", ".github/copilot-instructions.md"} {
+		if !slices.Contains(project.AgentInstructions, path) {
+			t.Errorf("agent instruction path %q not detected: %v", path, project.AgentInstructions)
+		}
+	}
+	if !slices.Contains(project.PlatformRequirements, ".github/workflows") {
+		t.Errorf("CI workflow directory not detected: %v", project.PlatformRequirements)
+	}
+}
+
+func TestAnalyzeDoesNotReclassifyManagedAdapterOutputAsCustomRules(t *testing.T) {
+	root := t.TempDir()
+	managed := "<!-- ai-init adapter:begin -->\n@AGENTS.md\n<!-- ai-init adapter:end -->\n"
+	for _, path := range []string{"AGENTS.md", "CLAUDE.md", ".cursor/rules/ai-init.mdc", ".github/copilot-instructions.md"} {
+		fullPath := filepath.Join(root, path)
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0700); err != nil {
+			t.Fatal(err)
+		}
+		body := managed
+		if path == "AGENTS.md" {
+			body = "<!-- ai-init:begin -->\nmanaged facts\n<!-- ai-init:end -->\n"
+		}
+		if err := os.WriteFile(fullPath, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project, err := Analyze(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(project.AgentInstructions) != 0 {
+		t.Fatalf("managed ai-init output was reclassified as custom rules: %v", project.AgentInstructions)
 	}
 }
 

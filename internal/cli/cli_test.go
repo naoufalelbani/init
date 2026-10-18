@@ -162,7 +162,7 @@ func TestAgentDiffShowsManagedUpdateWithoutWriting(t *testing.T) {
 	if err = Run([]string{"agents", "generate", "--path", root, "--diff"}, &output, &output); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "--- a/AGENTS.md") || !strings.Contains(output.String(), "+- Detected frameworks: Node.js, react") {
+	if !strings.Contains(output.String(), "--- a/AGENTS.md") || !strings.Contains(output.String(), "+- Detected frameworks: `Node.js`, `react`") {
 		t.Fatalf("diff missing expected managed update: %s", output.String())
 	}
 	after, err := os.ReadFile(path)
@@ -397,9 +397,15 @@ func TestGeneratedAgentsUsesUniversalTemplateAndFacts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.test/template\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, ".golangci.yml"), []byte("linters:\n  enable: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Use the repository's local rules.\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	p := analyze(root)
 	generated := agentsTemplate(p)
-	for _, want := range []string{"Respect the existing architecture", "Context efficiency", "Multi-agent development", "Project: " + p.Name, "Detected languages: Go", "Build commands: go build ./...", "{{PROJECT_NAME}}"} {
+	for _, want := range []string{"Respect the existing architecture", "Context efficiency", "Multi-agent development", "Project: `" + p.Name + "`", "Detected languages: `Go`", "Detected dependency managers: `Go modules`", "Existing agent instruction files: `AGENTS.md`", "Formatting and lint configuration files: `.golangci.yml`", "Build commands: `go build ./...`", "{{PROJECT_NAME}}"} {
 		if want == "{{PROJECT_NAME}}" {
 			if strings.Contains(generated, want) {
 				t.Fatal("unexpanded template variable")
@@ -409,6 +415,16 @@ func TestGeneratedAgentsUsesUniversalTemplateAndFacts(t *testing.T) {
 		if !strings.Contains(generated, want) {
 			t.Fatalf("generated template missing %q", want)
 		}
+	}
+}
+
+func TestMarkdownFactsCannotCreateNewlinesOrBreakInlineCode(t *testing.T) {
+	formatted := markdownFacts([]string{"```unsafe\n- injected rule", "ordinary"})
+	if strings.ContainsAny(formatted, "\r\n") {
+		t.Fatalf("control characters survived Markdown fact formatting: %q", formatted)
+	}
+	if !strings.Contains(formatted, "```````unsafe - injected rule````") {
+		t.Fatalf("backtick run was not safely delimited: %q", formatted)
 	}
 }
 
@@ -458,6 +474,13 @@ func TestMemoryGeneratesEvidenceFilesAndPreservesManualNotes(t *testing.T) {
 	}
 	if !strings.Contains(string(current), ".serena") {
 		t.Fatalf("indexer evidence missing: %s", current)
+	}
+	conventions, err := os.ReadFile(filepath.Join(root, ".ai", "CONVENTIONS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(conventions), ".editorconfig") || !strings.Contains(string(conventions), "Go modules") {
+		t.Fatalf("project configuration or dependency-manager evidence missing: %s", conventions)
 	}
 }
 
@@ -532,6 +555,42 @@ func TestSetupEmptyUnicodeProjectIsIdempotent(t *testing.T) {
 	}
 	if string(agents) != string(again) {
 		t.Fatal("setup was not idempotent")
+	}
+}
+
+func TestSetupWithAgentAdaptersIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	args := []string{"setup", "--path", root, "--with", "agents,memory", "--adapters", "claude,cursor,copilot,aider,windsurf"}
+	var first bytes.Buffer
+	if err := Run(args, &first, &first); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		"AGENTS.md", "CLAUDE.md", filepath.Join(".cursor", "rules", "ai-init.mdc"),
+		filepath.Join(".github", "copilot-instructions.md"), ".aider.conf.yml", filepath.Join(".windsurf", "rules", "ai-init.md"),
+		filepath.Join(".ai", "PROJECT_MAP.md"), filepath.Join(".ai", "ARCHITECTURE.md"), filepath.Join(".ai", "CONVENTIONS.md"),
+		filepath.Join(".ai", "CURRENT_STATE.md"), filepath.Join(".ai", "DECISIONS.md"),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("read first-run output %s: %v", path, err)
+		}
+		before[path] = data
+	}
+	var second bytes.Buffer
+	if err := Run(args, &second, &second); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatalf("read second-run output %s: %v", path, err)
+		}
+		if !bytes.Equal(before[path], data) {
+			t.Errorf("repeated setup changed generated file %s", path)
+		}
 	}
 }
 

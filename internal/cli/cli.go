@@ -12,9 +12,9 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	agentcfg "github.com/naoufalelbani/init/internal/agents"
 	"github.com/naoufalelbani/init/internal/analyzer"
@@ -146,6 +146,9 @@ func printProject(w io.Writer, root string, p project) {
 	}
 	fmt.Fprintf(w, "Source directories: %s\n", joinOrUnknown(p.Sources))
 	fmt.Fprintf(w, "Entry points: %s\n", joinOrUnknown(p.EntryPoints))
+	fmt.Fprintf(w, "Dependency managers: %s\n", joinOrUnknown(p.DependencyManagers))
+	fmt.Fprintf(w, "Project configuration: %s\n", joinOrUnknown(p.Configurations))
+	fmt.Fprintf(w, "Agent instructions: %s\n", joinOrUnknown(p.AgentInstructions))
 	fmt.Fprintf(w, "Build hints: %s\n", joinOrUnknown(p.Build))
 	fmt.Fprintf(w, "Test hints: %s\n", joinOrUnknown(p.Tests))
 }
@@ -154,6 +157,35 @@ func joinOrUnknown(a []string) string {
 		return "unknown"
 	}
 	return strings.Join(a, ", ")
+}
+
+func markdownFacts(values []string) string {
+	if len(values) == 0 {
+		return "unknown"
+	}
+	formatted := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
+			}
+			return r
+		}, value)
+		maxBackticks, current := 0, 0
+		for _, r := range value {
+			if r == '`' {
+				current++
+				if current > maxBackticks {
+					maxBackticks = current
+				}
+			} else {
+				current = 0
+			}
+		}
+		delimiter := strings.Repeat("`", maxBackticks+1)
+		formatted = append(formatted, delimiter+value+delimiter)
+	}
+	return strings.Join(formatted, ", ")
 }
 func setup(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
@@ -399,14 +431,18 @@ func writeFileSafe(path, content string, dry bool, w io.Writer) error {
 func agentsTemplate(p project) string {
 	template, _ := promptFiles.ReadFile("templates/AGENTS.template.md")
 	replacer := strings.NewReplacer(
-		"{{PROJECT_NAME}}", p.Name,
-		"{{LANGUAGES}}", joinOrUnknown(p.Languages),
-		"{{FRAMEWORKS}}", joinOrUnknown(p.Frameworks),
-		"{{SOURCES}}", joinOrUnknown(p.Sources),
-		"{{ENTRY_POINTS}}", joinOrUnknown(p.EntryPoints),
+		"{{PROJECT_NAME}}", markdownFacts([]string{p.Name}),
+		"{{LANGUAGES}}", markdownFacts(p.Languages),
+		"{{FRAMEWORKS}}", markdownFacts(p.Frameworks),
+		"{{DEPENDENCY_MANAGERS}}", markdownFacts(p.DependencyManagers),
+		"{{SOURCES}}", markdownFacts(p.Sources),
+		"{{ENTRY_POINTS}}", markdownFacts(p.EntryPoints),
+		"{{AGENT_INSTRUCTIONS}}", markdownFacts(p.AgentInstructions),
+		"{{PROJECT_CONFIGURATIONS}}", markdownFacts(p.Configurations),
+		"{{PLATFORM_REQUIREMENTS}}", markdownFacts(p.PlatformRequirements),
 		"{{GIT}}", fmt.Sprint(p.Git),
-		"{{BUILD_COMMANDS}}", joinOrUnknown(p.Build),
-		"{{TEST_COMMANDS}}", joinOrUnknown(p.Tests),
+		"{{BUILD_COMMANDS}}", markdownFacts(p.Build),
+		"{{TEST_COMMANDS}}", markdownFacts(p.Tests),
 	)
 	return replacer.Replace(string(template))
 }
@@ -646,22 +682,6 @@ func writeGitAttributes(root string, gitRepo, dry bool, w io.Writer) error {
 }
 
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return err
-	}
-	var configs, indexers []string
-	for _, entry := range entries {
-		name := entry.Name()
-		if strings.HasPrefix(name, ".prettierrc") || strings.HasPrefix(name, ".eslintrc") || strings.HasPrefix(name, "biome.") || slices.Contains([]string{".editorconfig", ".gitattributes", ".golangci.yml", ".golangci.yaml", "rustfmt.toml", ".rustfmt.toml", "pyproject.toml", "ruff.toml", ".clang-format", ".clang-tidy"}, name) {
-			configs = append(configs, name)
-		}
-		if slices.Contains([]string{".serena", ".graphify", "graphify.yml", "graphify.json", "mcp.json", ".mcp.json"}, name) {
-			indexers = append(indexers, name)
-		}
-	}
-	sort.Strings(configs)
-	sort.Strings(indexers)
 	branch, head := "unknown", "unknown"
 	if p.Git {
 		if value, e := git(root, "branch", "--show-current"); e == nil && value != "" {
@@ -672,10 +692,10 @@ func writeMemory(root string, p project, dry bool, w io.Writer) error {
 		}
 	}
 	items := map[string]string{
-		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from root manifests and directories. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n", p.Name, joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.EntryPoints), joinOrUnknown(p.Build), joinOrUnknown(p.Tests)),
-		"ARCHITECTURE.md":  fmt.Sprintf("# Architecture context\n\n## Verified repository facts\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n\n## Boundaries\nThe deterministic scan does not infer UI/backend or module ownership boundaries. Treat those as unknown until confirmed in source and project documentation.\n", joinOrUnknown(p.Languages), joinOrUnknown(p.Frameworks), joinOrUnknown(p.Sources), joinOrUnknown(p.EntryPoints), joinOrUnknown(p.Build), joinOrUnknown(p.Tests)),
-		"CONVENTIONS.md":   fmt.Sprintf("# Detected conventions\n\nConfiguration files found at the repository root: %s. Their contents define the authoritative formatting and lint rules. No additional naming or style conventions are inferred here.\n", joinOrUnknown(configs)),
-		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n", p.Git, branch, head, joinOrUnknown(indexers)),
+		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from root manifests and directories. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Dependency managers: %s\n- Source directories: %s\n- Entry points: %s\n- Build hints: %s\n- Test hints: %s\n", markdownFacts([]string{p.Name}), markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.DependencyManagers), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), markdownFacts(p.Build), markdownFacts(p.Tests)),
+		"ARCHITECTURE.md":  fmt.Sprintf("# Architecture context\n\n## Verified repository facts\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Platform and deployment evidence: %s\n- Build hints: %s\n- Test hints: %s\n\n## Boundaries\nThe deterministic scan does not infer UI/backend or module ownership boundaries. Treat those as unknown until confirmed in source and project documentation.\n", markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), markdownFacts(p.PlatformRequirements), markdownFacts(p.Build), markdownFacts(p.Tests)),
+		"CONVENTIONS.md":   fmt.Sprintf("# Detected conventions\n\nFormatting and lint configuration files: %s. Their contents define the authoritative rules. Git convention files: %s. Dependency managers: %s. Existing agent instruction sources: %s. No additional naming or style conventions are inferred here.\n", markdownFacts(p.Configurations), markdownFacts(p.GitConventions), markdownFacts(p.DependencyManagers), markdownFacts(p.AgentInstructions)),
+		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n", p.Git, markdownFacts([]string{branch}), markdownFacts([]string{head}), markdownFacts(p.Indexers)),
 		"DECISIONS.md":     "# Project decisions\n\nThe deterministic analyzer does not infer design decisions. Record manually approved decisions below.\n",
 	}
 	for _, name := range []string{"PROJECT_MAP.md", "ARCHITECTURE.md", "CONVENTIONS.md", "CURRENT_STATE.md", "DECISIONS.md"} {

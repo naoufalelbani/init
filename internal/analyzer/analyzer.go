@@ -14,6 +14,8 @@ import (
 type Project struct {
 	Name                                                      string
 	Languages, Frameworks, Build, Tests, Sources, EntryPoints []string
+	DependencyManagers, Configurations, AgentInstructions     []string
+	Indexers, GitConventions, PlatformRequirements            []string
 	Git                                                       bool
 }
 
@@ -32,6 +34,9 @@ func Analyze(root string) (Project, error) {
 	names := map[string]bool{}
 	for _, x := range entries {
 		names[x.Name()] = true
+	}
+	if err := collectRepositoryMetadata(root, names, &p); err != nil {
+		return Project{}, err
 	}
 	for f, l := range checks {
 		ok := names[f]
@@ -55,6 +60,7 @@ func Analyze(root string) (Project, error) {
 			Scripts         map[string]string `json:"scripts"`
 			Dependencies    map[string]string `json:"dependencies"`
 			DevDependencies map[string]string `json:"devDependencies"`
+			PackageManager  string            `json:"packageManager"`
 		}
 		if err := json.Unmarshal(b, &manifest); err != nil {
 			return Project{}, fmt.Errorf("parse package.json: %w", err)
@@ -73,12 +79,28 @@ func Analyze(root string) (Project, error) {
 		}
 		p.Frameworks = append(p.Frameworks, "Node.js")
 		manager := "npm"
-		if names["pnpm-lock.yaml"] {
+		declaredManager := strings.SplitN(manifest.PackageManager, "@", 2)[0]
+		if declaredManager == "npm" || declaredManager == "pnpm" || declaredManager == "yarn" || declaredManager == "bun" {
+			manager = declaredManager
+		} else if names["pnpm-lock.yaml"] {
 			manager = "pnpm"
 		} else if names["yarn.lock"] {
 			manager = "yarn"
 		} else if names["bun.lockb"] || names["bun.lock"] {
 			manager = "bun"
+		}
+		if declaredManager != "" {
+			if declaredManager == "npm" || declaredManager == "pnpm" || declaredManager == "yarn" || declaredManager == "bun" {
+				p.DependencyManagers = append(p.DependencyManagers, declaredManager+" (packageManager field)")
+			} else {
+				p.DependencyManagers = append(p.DependencyManagers, "unrecognized packageManager declaration")
+			}
+		}
+		for _, lockfile := range []string{"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock"} {
+			if names[lockfile] {
+				p.DependencyManagers = append(p.DependencyManagers, manager)
+				break
+			}
 		}
 		if names["tsconfig.json"] {
 			p.Languages = append(p.Languages, "TypeScript")
@@ -106,6 +128,7 @@ func Analyze(root string) (Project, error) {
 		}
 	}
 	if names["pubspec.yaml"] {
+		p.DependencyManagers = append(p.DependencyManagers, "Dart pub")
 		b, err := os.ReadFile(filepath.Join(root, "pubspec.yaml"))
 		if err != nil {
 			return Project{}, fmt.Errorf("read pubspec.yaml: %w", err)
@@ -120,6 +143,7 @@ func Analyze(root string) (Project, error) {
 		}
 	}
 	if names["Cargo.toml"] {
+		p.DependencyManagers = append(p.DependencyManagers, "Cargo")
 		data, err := os.ReadFile(filepath.Join(root, "Cargo.toml"))
 		if err != nil {
 			return Project{}, fmt.Errorf("read Cargo.toml: %w", err)
@@ -141,6 +165,15 @@ func Analyze(root string) (Project, error) {
 			return Project{}, fmt.Errorf("read %s: %w", name, err)
 		}
 		text := strings.ToLower(string(data))
+		if name == "requirements.txt" {
+			p.DependencyManagers = append(p.DependencyManagers, "pip requirements")
+		} else if names["uv.lock"] {
+			p.DependencyManagers = append(p.DependencyManagers, "uv")
+		} else if strings.Contains(text, "[tool.poetry]") || strings.Contains(text, "poetry-core") {
+			p.DependencyManagers = append(p.DependencyManagers, "Poetry")
+		} else {
+			p.DependencyManagers = append(p.DependencyManagers, "pyproject.toml (manager unspecified)")
+		}
 		for _, framework := range []string{"django", "fastapi", "flask", "pytest"} {
 			if strings.Contains(text, framework) {
 				if framework == "pytest" {
@@ -165,6 +198,11 @@ func Analyze(root string) (Project, error) {
 			return Project{}, fmt.Errorf("read %s: %w", name, err)
 		}
 		text := strings.ToLower(string(data))
+		if name == "pom.xml" {
+			p.DependencyManagers = append(p.DependencyManagers, "Maven")
+		} else {
+			p.DependencyManagers = append(p.DependencyManagers, "Gradle")
+		}
 		if strings.Contains(text, "spring-boot") || strings.Contains(text, "springframework") {
 			p.Frameworks = append(p.Frameworks, "Spring")
 		}
@@ -173,6 +211,7 @@ func Analyze(root string) (Project, error) {
 		p.Languages = append(p.Languages, "TypeScript")
 	}
 	if names["go.mod"] {
+		p.DependencyManagers = append(p.DependencyManagers, "Go modules")
 		p.Build = append(p.Build, "go build ./...")
 		p.Tests = append(p.Tests, "go test ./...")
 	}
@@ -218,6 +257,7 @@ func Analyze(root string) (Project, error) {
 	}
 	for name := range names {
 		if strings.HasSuffix(name, ".csproj") {
+			p.DependencyManagers = append(p.DependencyManagers, "NuGet (.csproj)")
 			p.Tests = append(p.Tests, "dotnet test")
 		}
 	}
@@ -264,11 +304,138 @@ func Analyze(root string) (Project, error) {
 	p.Frameworks = uniqueStrings(p.Frameworks)
 	p.Build = uniqueStrings(p.Build)
 	p.Tests = uniqueStrings(p.Tests)
+	p.DependencyManagers = uniqueStrings(p.DependencyManagers)
+	p.Configurations = uniqueStrings(p.Configurations)
+	p.AgentInstructions = uniqueStrings(p.AgentInstructions)
+	p.Indexers = uniqueStrings(p.Indexers)
+	p.GitConventions = uniqueStrings(p.GitConventions)
+	p.PlatformRequirements = uniqueStrings(p.PlatformRequirements)
 	sort.Strings(p.Languages)
 	sort.Strings(p.Frameworks)
 	sort.Strings(p.Sources)
 	sort.Strings(p.EntryPoints)
+	sort.Strings(p.DependencyManagers)
+	sort.Strings(p.Configurations)
+	sort.Strings(p.AgentInstructions)
+	sort.Strings(p.Indexers)
+	sort.Strings(p.GitConventions)
+	sort.Strings(p.PlatformRequirements)
 	return p, nil
+}
+
+func collectRepositoryMetadata(root string, names map[string]bool, p *Project) error {
+	p.Configurations = selectNames(names, []string{
+		".editorconfig", ".prettierrc", ".prettierrc.json", ".prettierrc.yml", ".prettierrc.yaml", "prettier.config.js", "prettier.config.cjs", "prettier.config.mjs",
+		".eslintrc", ".eslintrc.json", ".eslintrc.js", ".eslintrc.cjs", "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "biome.json", "biome.jsonc",
+		".golangci.yml", ".golangci.yaml", "rustfmt.toml", ".rustfmt.toml", "ruff.toml", ".ruff.toml", "mypy.ini", "pytest.ini", "tox.ini", "pyproject.toml", ".clang-format", ".clang-tidy",
+	})
+	for name := range names {
+		if strings.HasPrefix(name, ".prettierrc") || strings.HasPrefix(name, ".eslintrc") || strings.HasPrefix(name, "biome.") {
+			p.Configurations = append(p.Configurations, name)
+		}
+	}
+	p.Indexers = selectNames(names, []string{".serena", ".graphify", "graphify.yml", "graphify.yaml", "graphify.json", "mcp.json", ".mcp.json"})
+	p.GitConventions = selectNames(names, []string{".gitignore", ".gitattributes", ".gitmodules", ".mailmap", ".gitmessage"})
+	p.PlatformRequirements = selectNames(names, []string{"Dockerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml", "Makefile", "Vagrantfile"})
+	for _, path := range []string{".github/workflows", ".devcontainer"} {
+		exists, err := pathExists(filepath.Join(root, filepath.FromSlash(path)))
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", path, err)
+		}
+		if exists {
+			p.PlatformRequirements = append(p.PlatformRequirements, path)
+		}
+	}
+	for _, path := range []string{"AGENTS.md", "CLAUDE.md", "GEMINI.md", ".clinerules", ".aider.conf.yml", ".github/copilot-instructions.md"} {
+		if !names[filepath.Base(filepath.FromSlash(path))] && path != ".github/copilot-instructions.md" {
+			continue
+		}
+		if path == ".github/copilot-instructions.md" {
+			if exists, err := pathExists(filepath.Join(root, filepath.FromSlash(path))); err != nil {
+				return fmt.Errorf("inspect %s: %w", path, err)
+			} else if !exists {
+				continue
+			}
+		}
+		if err := appendUnmanagedInstruction(root, path, p); err != nil {
+			return err
+		}
+	}
+	for _, dir := range []string{".cursor/rules", ".windsurf/rules", ".claude/rules", ".cline/rules", ".github/instructions"} {
+		fullDir := filepath.Join(root, filepath.FromSlash(dir))
+		files, err := os.ReadDir(fullDir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read agent instruction directory %s: %w", dir, err)
+		}
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			path := filepath.ToSlash(filepath.Join(dir, file.Name()))
+			if err := appendUnmanagedInstruction(root, path, p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func appendUnmanagedInstruction(root, relative string, p *Project) error {
+	fullPath := filepath.Join(root, filepath.FromSlash(relative))
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return fmt.Errorf("inspect agent instruction %s: %w", relative, err)
+	}
+	if info.IsDir() {
+		files, err := os.ReadDir(fullPath)
+		if err != nil {
+			return fmt.Errorf("read agent instruction directory %s: %w", relative, err)
+		}
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			child := filepath.ToSlash(filepath.Join(relative, file.Name()))
+			if err := appendUnmanagedInstruction(root, child, p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return fmt.Errorf("read agent instruction %s: %w", relative, err)
+	}
+	text := string(data)
+	if strings.Contains(text, "<!-- ai-init:begin -->") || strings.Contains(text, "<!-- ai-init adapter:begin -->") || strings.Contains(text, "# ai-init managed instructions") {
+		return nil
+	}
+	p.AgentInstructions = append(p.AgentInstructions, relative)
+	return nil
+}
+
+func selectNames(names map[string]bool, candidates []string) []string {
+	var found []string
+	for _, candidate := range candidates {
+		if names[candidate] {
+			found = append(found, candidate)
+		}
+	}
+	return found
+}
+
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 func uniqueStrings(values []string) []string {

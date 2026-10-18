@@ -4,7 +4,7 @@
 
 ## Status
 
-The Go CLI, deterministic project analysis, managed `AGENTS.md` generation, documented agent adapters, persistent evidence-based context, port allocation, disposable-worktree integration, optional staged-content hooks, cautious `.gitattributes` setup, doctor, and reusable prompt library are implemented. Stack hints cover common Go, Rust, Dart/Flutter, Python, JavaScript/TypeScript, Java, C#/.NET, and CMake/Qt projects. Graphify and Serena are detected as available context sources, but ai-init does not invoke their APIs. Detection is intentionally conservative and does not infer full UI/backend boundaries, lint conventions, or database isolation.
+The Go CLI, deterministic project analysis, managed `AGENTS.md` generation, documented agent adapters, persistent evidence-based context, port allocation, disposable-worktree integration, optional staged-content hooks, cautious `.gitattributes` setup, doctor, and reusable prompt library are implemented. Stack hints cover common Go, Rust, Dart/Flutter, Python, JavaScript/TypeScript, Java, C#/.NET, and CMake/Qt projects. Analysis records dependency-manager declarations and lockfiles, existing agent instruction paths, recognized formatting/lint configuration files, Git convention files, deployment/platform markers, and Graphify/Serena configuration paths. Graphify and Serena are detected as available context sources, but ai-init does not invoke their APIs. Detection is intentionally conservative: configuration contents remain authoritative, and it does not infer full UI/backend boundaries or database isolation.
 
 ## Install
 
