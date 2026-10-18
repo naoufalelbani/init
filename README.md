@@ -37,6 +37,7 @@ ai-init doctor
 ai-init setup --path "../my project" --dry-run
 ai-init setup --diff
 ai-init setup --with agents,memory,worktrees
+ai-init setup --with gitattributes
 ai-init setup --adapters claude,cursor,copilot,aider
 ai-init agents audit
 ai-init agents sync --diff
@@ -54,6 +55,7 @@ ai-init memory update
 - `wt list|status [task]|sync <task> [--dry-run]|integrate <task> [--dry-run]|cleanup <task> [--dry-run]`: inspect, preview or sync, validate and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch.
 - `ports allocate|list|release`: manage explicit, per-task service port records.
 - `prompt agents|worktrees|audit|config`: display a reusable prompt or export it with `--output FILE` (existing files are never overwritten).
+- `setup --with gitattributes`: add managed cross-platform text rules when `.gitattributes` is absent. Existing custom files are preserved; setup never renormalizes tracked files.
 - `doctor`, `version`, `help`.
 
 ## Agent configuration
@@ -95,7 +97,7 @@ Use focused changes, Go formatting, and standard library APIs where practical. R
 - Environment values are never copied by default. Each repeated `--env NAME` explicitly selects a variable from ai-init's process environment. Selected values are stored in the ignored `.ai-init.env.json` task-local file and named in the task primer; the values are never printed. Treat this file as sensitive, review it before sharing the workspace, and do not commit it. On Windows the file inherits the containing directory's ACL; on Unix it is created with owner-only permissions.
 - A free port is chosen and recorded, then its temporary socket is closed. The record is not a persistent socket reservation, and ai-init does not automatically inject environment variables into a service process.
 - Graphify and Serena are detected but not called through their tool interfaces.
-- Setup does not propagate environment files, install Git hooks, generate `.gitattributes`, or isolate databases. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
+- Setup does not propagate environment files, install Git hooks, or isolate databases. `.gitattributes` support is explicit opt-in and preserves an existing custom file. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
 - Existing unmarked agent configuration is preserved as-is; run the corresponding tool's own validator after manual edits.
 - Static detection may miss monorepo packages, custom scripts, and project-specific test conventions; inspect `analyze` output before relying on generated hints.
 

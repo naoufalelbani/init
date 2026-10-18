@@ -73,7 +73,7 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `ai-init initializes AI-assisted development environments.
 
 Usage:
-  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory]
+  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory,gitattributes]
   ai-init analyze [--path DIR]
   ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME] [--diff]
   ai-init memory generate|update [--path DIR]
@@ -378,7 +378,7 @@ func setup(args []string, w io.Writer) error {
 	path := fs.String("path", ".", "project path")
 	dry := fs.Bool("dry-run", false, "preview without writing")
 	diff := fs.Bool("diff", false, "show AGENTS.md changes without writing")
-	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory")
+	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory,gitattributes")
 	adapters := fs.String("adapters", "", "comma-separated agent adapters; empty detects existing configuration")
 	verbose := fs.Bool("verbose", false, "show details")
 	if e := fs.Parse(args); e != nil {
@@ -397,7 +397,7 @@ func setup(args []string, w io.Writer) error {
 	selected := map[string]bool{}
 	for _, v := range strings.Split(*with, ",") {
 		name := strings.TrimSpace(v)
-		if name != "agents" && name != "worktrees" && name != "memory" {
+		if name != "agents" && name != "worktrees" && name != "memory" && name != "gitattributes" {
 			return fmt.Errorf("unknown setup component %q", name)
 		}
 		selected[name] = true
@@ -440,6 +440,11 @@ func setup(args []string, w io.Writer) error {
 	}
 	if selected["worktrees"] {
 		if e := installWorktreeGuide(root, *dry, w); e != nil {
+			return e
+		}
+	}
+	if selected["gitattributes"] {
+		if e := writeGitAttributes(root, *dry, w); e != nil {
 			return e
 		}
 	}
@@ -775,6 +780,9 @@ func verifySetup(root string, selected map[string]bool) error {
 	if selected["worktrees"] {
 		required = append(required, filepath.Join(".ai-init", "WORKTREES.md"))
 	}
+	if selected["gitattributes"] {
+		required = append(required, ".gitattributes")
+	}
 	for _, name := range required {
 		info, err := os.Stat(filepath.Join(root, name))
 		if err != nil {
@@ -790,6 +798,40 @@ func verifySetup(root string, selected map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+func writeGitAttributes(root string, dry bool, w io.Writer) error {
+	const begin = "# ai-init gitattributes:begin"
+	const end = "# ai-init gitattributes:end"
+	const body = "* text=auto\n*.sh text eol=lf\n*.bash text eol=lf\n*.bat text eol=crlf\n*.cmd text eol=crlf\n*.ps1 text eol=crlf"
+	path := filepath.Join(root, ".gitattributes")
+	old, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		content := begin + "\n" + body + "\n" + end + "\n"
+		if dry {
+			writeUnifiedDiff(w, ".gitattributes", nil, []byte(content))
+		}
+		return writeFileSafe(path, content, dry, w)
+	}
+	if err != nil {
+		return err
+	}
+	text := string(old)
+	start := strings.Index(text, begin)
+	finish := strings.Index(text, end)
+	if start < 0 && finish < 0 {
+		fmt.Fprintf(w, "  preserved %s (custom attributes detected; no ai-init managed block)\n", path)
+		return nil
+	}
+	if start < 0 || finish < 0 || finish < start || strings.Count(text, begin) != 1 || strings.Count(text, end) != 1 {
+		return fmt.Errorf(".gitattributes managed markers are incomplete or out of order; preserving %s", path)
+	}
+	finish += len(end)
+	updated := text[:start] + begin + "\n" + body + "\n" + end + text[finish:]
+	if dry && !bytes.Equal(old, []byte(updated)) {
+		writeUnifiedDiff(w, ".gitattributes", old, []byte(updated))
+	}
+	return writeFileSafe(path, updated, dry, w)
 }
 
 func writeMemory(root string, p project, dry bool, w io.Writer) error {

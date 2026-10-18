@@ -961,3 +961,96 @@ func TestEmbeddedPromptAssetsMatchStandaloneFiles(t *testing.T) {
 		t.Fatal("embedded universal template differs from standalone asset")
 	}
 }
+
+func TestSetupGitattributesAddsManagedCrossPlatformRulesWithoutRenormalizing(t *testing.T) {
+	root, _ := integrationFixture(t, "git attributes")
+	tracked := filepath.Join(root, "windows-script.cmd")
+	contents := []byte("@echo off\r\necho safe\r\n")
+	if err := os.WriteFile(tracked, contents, 0600); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, root, "add", "windows-script.cmd")
+	runGitTest(t, root, "commit", "-m", "add CRLF script")
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--with", "gitattributes"}, &output, &output); err != nil {
+		t.Fatalf("setup: %v\n%s", err, output.String())
+	}
+	data, err := os.ReadFile(filepath.Join(root, ".gitattributes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{"* text=auto", "*.sh text eol=lf", "*.bat text eol=crlf", "*.cmd text eol=crlf", "*.ps1 text eol=crlf"} {
+		if !strings.Contains(string(data), rule) {
+			t.Fatalf("missing rule %q in %s", rule, data)
+		}
+	}
+	attr, err := git(root, "check-attr", "text", "eol", "--", "windows-script.cmd")
+	if err != nil || !strings.Contains(attr, "text: set") || !strings.Contains(attr, "eol: crlf") {
+		t.Fatalf("Git did not apply the expected Windows script attributes: %q (%v)", attr, err)
+	}
+	after, err := os.ReadFile(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, contents) {
+		t.Fatalf("setup changed existing CRLF file bytes: %q", after)
+	}
+	status, err := git(root, "status", "--porcelain")
+	if err != nil || strings.TrimSpace(status) != "?? .gitattributes" {
+		t.Fatalf("unexpected worktree changes after setup: %q (%v)", status, err)
+	}
+	var again bytes.Buffer
+	if err = Run([]string{"setup", "--path", root, "--with", "gitattributes"}, &again, &again); err != nil {
+		t.Fatalf("repeat setup: %v\n%s", err, again.String())
+	}
+	dataAgain, err := os.ReadFile(filepath.Join(root, ".gitattributes"))
+	if err != nil || !bytes.Equal(data, dataAgain) {
+		t.Fatalf("managed attributes are not idempotent: err=%v\n%s", err, dataAgain)
+	}
+}
+
+func TestSetupGitattributesPreservesExistingCustomRules(t *testing.T) {
+	root := t.TempDir()
+	existing := "*.bin binary\n*.txt text eol=lf\n"
+	path := filepath.Join(root, ".gitattributes")
+	if err := os.WriteFile(path, []byte(existing), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--with", "gitattributes"}, &output, &output); err != nil {
+		t.Fatalf("setup: %v\n%s", err, output.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != existing || !strings.Contains(output.String(), "custom attributes detected") {
+		t.Fatalf("custom attributes were not preserved/reported: %q\n%s", after, output.String())
+	}
+}
+
+func TestSetupGitattributesDryRunAndMalformedMarkers(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	if err := Run([]string{"setup", "--path", root, "--with", "gitattributes", "--dry-run"}, &output, &output); err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if !strings.Contains(output.String(), "+*.cmd text eol=crlf") {
+		t.Fatalf("dry-run omitted the proposed attributes: %s", output.String())
+	}
+	path := filepath.Join(root, ".gitattributes")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote .gitattributes: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("# ai-init gitattributes:begin\n*.bin binary\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	original, _ := os.ReadFile(path)
+	if err := writeGitAttributes(root, false, &output); err == nil {
+		t.Fatal("expected malformed managed block to be rejected")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(original, after) {
+		t.Fatalf("malformed block was modified: %q err=%v", after, err)
+	}
+}
