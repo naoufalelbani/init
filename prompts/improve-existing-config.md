@@ -1,0 +1,2 @@
+# Improve existing agent configuration
+Inventory existing agent configuration and preserve custom instructions. Check the target tool's official documented file format and location. Avoid unsupported syntax. Keep canonical rules in root `AGENTS.md` where supported, reference canonical rules when possible, and synchronize copies only when required. Show a diff and keep a rollback copy before editing.

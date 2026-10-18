@@ -1,0 +1,2 @@
+# Set up worktrees
+Inspect the Git repository and its current state. Explain the worktree directory and branch naming before creating anything. Give each task a separate worktree and branch. Keep task notes local unless asked to track them. Never edit another task's worktree. Before integration, inspect both branches, protect uncommitted work, validate the combined result, and report conflicts without discarding changes. Cleanup only clean, integrated work.
