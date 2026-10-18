@@ -901,9 +901,17 @@ func TestWorktreeNewWithIDEOpensOnlyAfterSetupAndLockRelease(t *testing.T) {
 	opened := false
 	open := func(gitRoot, task, adapter string, _ io.Writer) error {
 		opened = true
-		rootMatches := filepath.Clean(gitRoot) == filepath.Clean(root)
+		gotRoot, err := filepath.EvalSymlinks(gitRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantRoot, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rootMatches := filepath.Clean(gotRoot) == filepath.Clean(wantRoot)
 		if runtime.GOOS == "windows" {
-			rootMatches = strings.EqualFold(filepath.Clean(gitRoot), filepath.Clean(root))
+			rootMatches = strings.EqualFold(filepath.Clean(gotRoot), filepath.Clean(wantRoot))
 		}
 		if !rootMatches || task != "auto-open" || adapter != "codex" {
 			t.Fatalf("opener received root=%q task=%q adapter=%q", gitRoot, task, adapter)
