@@ -111,7 +111,12 @@ func write(path, content string, dry bool) error {
 		if bytes.Equal(old, []byte(content)) {
 			return nil
 		}
-		if strings.Contains(string(old), begin) && strings.Contains(string(old), end) {
+		hasBegin := strings.Contains(string(old), begin)
+		hasEnd := strings.Contains(string(old), end)
+		if hasBegin || hasEnd {
+			if !hasBegin || !hasEnd {
+				return fmt.Errorf("managed block is incomplete; preserving %s", path)
+			}
 			text := string(old)
 			i := strings.Index(text, begin)
 			relative := strings.Index(text[i:], end)

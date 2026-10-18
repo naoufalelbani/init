@@ -75,6 +75,26 @@ func TestConfigureDryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestConfigureRejectsIncompleteManagedBlockWithoutChangingFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".aider.conf.yml")
+	want := "# " + begin + "\ncustom truncated content\n"
+	if err := os.WriteFile(path, []byte(want), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := Configure(root, []string{"aider"}, false, &out); err == nil {
+		t.Fatal("expected incomplete managed block error")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("malformed custom file changed: %q", got)
+	}
+}
+
 func TestConfigureCursorRefreshPreservesFilePreambleAndCustomTail(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, ".cursor", "rules", "ai-init.mdc")
