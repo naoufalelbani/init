@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"time"
 
 	agentcfg "github.com/naoufalelbani/init/internal/agents"
+	"github.com/naoufalelbani/init/internal/analyzer"
 	envprop "github.com/naoufalelbani/init/internal/environment"
 	hookguard "github.com/naoufalelbani/init/internal/hooks"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
@@ -25,11 +25,7 @@ import (
 
 const version = "0.1.0"
 
-type project struct {
-	Name                                                      string
-	Languages, Frameworks, Build, Tests, Sources, EntryPoints []string
-	Git                                                       bool
-}
+type project = analyzer.Project
 
 func Run(args []string, out, errOut io.Writer) error {
 	if len(args) == 0 {
@@ -49,7 +45,10 @@ func Run(args []string, out, errOut io.Writer) error {
 			return e
 		}
 		_ = rest
-		p := analyze(root)
+		p, e := analyzer.Analyze(root)
+		if e != nil {
+			return e
+		}
 		printProject(out, root, p)
 		return nil
 	case "doctor":
@@ -140,226 +139,6 @@ func discoverRoot(start string) string {
 		current = parent
 	}
 }
-func analyze(root string) project {
-	p := project{Name: filepath.Base(root)}
-	if _, e := os.Stat(filepath.Join(root, ".git")); e == nil {
-		p.Git = true
-	}
-	checks := map[string]string{"go.mod": "Go", "Cargo.toml": "Rust", "pubspec.yaml": "Dart", "pyproject.toml": "Python", "requirements.txt": "Python", "package.json": "JavaScript", "pom.xml": "Java", "build.gradle": "Java", "build.gradle.kts": "Kotlin / Java", "*.csproj": "C# / .NET", "CMakeLists.txt": "C / C++"}
-	entries, _ := os.ReadDir(root)
-	names := map[string]bool{}
-	for _, x := range entries {
-		names[x.Name()] = true
-	}
-	for f, l := range checks {
-		ok := names[f]
-		if strings.HasPrefix(f, "*.") {
-			for n := range names {
-				if strings.HasSuffix(n, strings.TrimPrefix(f, "*")) {
-					ok = true
-				}
-			}
-		}
-		if ok {
-			p.Languages = append(p.Languages, l)
-		}
-	}
-	if names["package.json"] {
-		b, _ := os.ReadFile(filepath.Join(root, "package.json"))
-		var manifest struct {
-			Scripts         map[string]string `json:"scripts"`
-			Dependencies    map[string]string `json:"dependencies"`
-			DevDependencies map[string]string `json:"devDependencies"`
-		}
-		_ = json.Unmarshal(b, &manifest)
-		dependencies := map[string]bool{}
-		for name := range manifest.Dependencies {
-			dependencies[name] = true
-		}
-		for name := range manifest.DevDependencies {
-			dependencies[name] = true
-		}
-		for _, name := range []string{"react", "vue", "vite", "next", "express", "@angular/core", "svelte", "@sveltejs/kit", "electron", "nuxt", "gatsby"} {
-			if dependencies[name] {
-				p.Frameworks = append(p.Frameworks, name)
-			}
-		}
-		p.Frameworks = append(p.Frameworks, "Node.js")
-		manager := "npm"
-		if names["pnpm-lock.yaml"] {
-			manager = "pnpm"
-		} else if names["yarn.lock"] {
-			manager = "yarn"
-		} else if names["bun.lockb"] || names["bun.lock"] {
-			manager = "bun"
-		}
-		if names["tsconfig.json"] {
-			p.Languages = append(p.Languages, "TypeScript")
-		}
-		if len(manifest.Scripts) > 0 {
-			p.Build = append(p.Build, "inspect package.json scripts")
-			if _, ok := manifest.Scripts["build"]; ok {
-				if manager == "npm" {
-					p.Build = append(p.Build, "npm run build")
-				} else {
-					p.Build = append(p.Build, manager+" run build")
-				}
-			}
-			if _, ok := manifest.Scripts["test"]; ok {
-				if manager == "pnpm" {
-					p.Tests = append(p.Tests, "pnpm test")
-				} else if manager == "yarn" {
-					p.Tests = append(p.Tests, "yarn test")
-				} else if manager == "bun" {
-					p.Tests = append(p.Tests, "bun run test")
-				} else {
-					p.Tests = append(p.Tests, "npm test")
-				}
-			}
-		}
-	}
-	if names["pubspec.yaml"] {
-		b, _ := os.ReadFile(filepath.Join(root, "pubspec.yaml"))
-		if bytes.Contains(b, []byte("flutter:")) {
-			p.Frameworks = append(p.Frameworks, "Flutter")
-			if names["test"] {
-				p.Tests = append(p.Tests, "flutter test")
-			}
-		} else if names["test"] {
-			p.Tests = append(p.Tests, "dart test")
-		}
-	}
-	if names["Cargo.toml"] {
-		data, _ := os.ReadFile(filepath.Join(root, "Cargo.toml"))
-		text := strings.ToLower(string(data))
-		for _, name := range []string{"tokio", "axum", "actix-web", "serde", "tauri"} {
-			if strings.Contains(text, name) {
-				p.Frameworks = append(p.Frameworks, name)
-			}
-		}
-	}
-	if names["pyproject.toml"] || names["requirements.txt"] {
-		name := "pyproject.toml"
-		if !names[name] {
-			name = "requirements.txt"
-		}
-		data, _ := os.ReadFile(filepath.Join(root, name))
-		text := strings.ToLower(string(data))
-		for _, framework := range []string{"django", "fastapi", "flask", "pytest"} {
-			if strings.Contains(text, framework) {
-				if framework == "pytest" {
-					p.Tests = append(p.Tests, "pytest")
-				} else {
-					p.Frameworks = append(p.Frameworks, framework)
-				}
-			}
-		}
-	}
-	if names["pom.xml"] || names["build.gradle"] || names["build.gradle.kts"] {
-		name := "pom.xml"
-		if !names[name] {
-			if names["build.gradle"] {
-				name = "build.gradle"
-			} else {
-				name = "build.gradle.kts"
-			}
-		}
-		data, _ := os.ReadFile(filepath.Join(root, name))
-		text := strings.ToLower(string(data))
-		if strings.Contains(text, "spring-boot") || strings.Contains(text, "springframework") {
-			p.Frameworks = append(p.Frameworks, "Spring")
-		}
-	}
-	if names["tsconfig.json"] && !names["package.json"] {
-		p.Languages = append(p.Languages, "TypeScript")
-	}
-	if names["go.mod"] {
-		p.Build = append(p.Build, "go build ./...")
-		p.Tests = append(p.Tests, "go test ./...")
-	}
-	if names["Cargo.toml"] {
-		p.Build = append(p.Build, "cargo build")
-		p.Tests = append(p.Tests, "cargo test")
-	}
-	if names["pyproject.toml"] {
-		p.Build = append(p.Build, "unknown (pyproject.toml detected)")
-		if names["pytest.ini"] || names["tox.ini"] {
-			p.Tests = append(p.Tests, "pytest")
-		}
-	}
-	if names["pom.xml"] {
-		if runtime.GOOS == "windows" && names["mvnw.cmd"] {
-			p.Build = append(p.Build, "mvnw.cmd package")
-			p.Tests = append(p.Tests, "mvnw.cmd test")
-		} else if names["mvnw"] {
-			p.Build = append(p.Build, "./mvnw package")
-			p.Tests = append(p.Tests, "./mvnw test")
-		} else {
-			p.Build = append(p.Build, "mvn package")
-			p.Tests = append(p.Tests, "mvn test")
-		}
-	}
-	if names["build.gradle"] || names["build.gradle.kts"] {
-		if runtime.GOOS == "windows" && names["gradlew.bat"] {
-			p.Tests = append(p.Tests, "gradlew.bat test")
-		} else if names["gradlew"] {
-			p.Tests = append(p.Tests, "./gradlew test")
-		} else {
-			p.Tests = append(p.Tests, "gradle test")
-		}
-	}
-	if names["CMakeLists.txt"] {
-		b, _ := os.ReadFile(filepath.Join(root, "CMakeLists.txt"))
-		if bytes.Contains(b, []byte("Qt5")) || bytes.Contains(b, []byte("Qt6")) {
-			p.Frameworks = append(p.Frameworks, "Qt")
-		}
-	}
-	for name := range names {
-		if strings.HasSuffix(name, ".csproj") {
-			p.Tests = append(p.Tests, "dotnet test")
-		}
-	}
-	if names["pytest.ini"] || names["tox.ini"] {
-		p.Tests = append(p.Tests, "pytest")
-	}
-	if names["requirements.txt"] {
-		b, _ := os.ReadFile(filepath.Join(root, "requirements.txt"))
-		if bytes.Contains(bytes.ToLower(b), []byte("pytest")) {
-			p.Tests = append(p.Tests, "pytest")
-		}
-	}
-	for _, candidate := range []string{"main.go", "main.py", "main.rs", "main.cpp", "index.js", "index.ts", "Program.cs", "src/main.go", "src/main.py", "src/main.rs", "src/main.dart", "src/main.js", "src/main.ts", "src/main.tsx", "src/index.js", "src/index.ts", "src/App.tsx", "lib/main.dart", "src/Program.cs", "src/main.cpp"} {
-		if _, err := os.Stat(filepath.Join(root, candidate)); err == nil {
-			p.EntryPoints = append(p.EntryPoints, candidate)
-		}
-	}
-	for _, d := range []string{"src", "app", "cmd", "lib", "internal", "pkg", "test", "tests"} {
-		if names[d] {
-			p.Sources = append(p.Sources, d)
-		}
-	}
-	p.Languages = uniqueStrings(p.Languages)
-	p.Frameworks = uniqueStrings(p.Frameworks)
-	p.Build = uniqueStrings(p.Build)
-	p.Tests = uniqueStrings(p.Tests)
-	sort.Strings(p.Languages)
-	sort.Strings(p.Frameworks)
-	sort.Strings(p.Sources)
-	sort.Strings(p.EntryPoints)
-	return p
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]bool, len(values))
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if !seen[value] {
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
-	return out
-}
 func printProject(w io.Writer, root string, p project) {
 	fmt.Fprintf(w, "Project: %s\nPath: %s\nStack: %s\nGit: %t\n", p.Name, root, joinOrUnknown(p.Languages), p.Git)
 	if len(p.Frameworks) > 0 {
@@ -414,7 +193,10 @@ func setup(args []string, w io.Writer) error {
 	if len(splitList(*adapters)) > 0 && !selected["agents"] {
 		return errors.New("--adapters requires the agents component in --with")
 	}
-	p := analyze(root)
+	p, e := analyzer.Analyze(root)
+	if e != nil {
+		return e
+	}
 	printProject(w, root, p)
 	fmt.Fprintln(w, "\nSetup:")
 	if selected["agents"] {
@@ -981,7 +763,10 @@ func agents(args []string, w io.Writer) error {
 		if !pathSpecified(args[1:]) {
 			root = discoverRoot(root)
 		}
-		project := analyze(root)
+		project, err := analyzer.Analyze(root)
+		if err != nil {
+			return err
+		}
 		if *diff {
 			return writeAgentsDiff(root, project, w)
 		}
@@ -1024,7 +809,11 @@ func memory(args []string, w io.Writer) error {
 	if !pathSpecified(args[1:]) {
 		root = discoverRoot(root)
 	}
-	return writeMemory(root, analyze(root), *dry, w)
+	p, err := analyzer.Analyze(root)
+	if err != nil {
+		return err
+	}
+	return writeMemory(root, p, *dry, w)
 }
 
 func ports(args []string, w io.Writer) error {
@@ -1272,7 +1061,10 @@ func integrate(root, sourceWorktree, task string, out io.Writer, dry bool) error
 	if _, err = git(temp, "merge", "--no-edit", taskHead); err != nil {
 		return fmt.Errorf("integration conflict or merge failure in disposable worktree %s; target and task branches are unchanged: %w", temp, err)
 	}
-	p := analyze(temp)
+	p, err := analyzer.Analyze(temp)
+	if err != nil {
+		return fmt.Errorf("analyze combined integration result: %w", err)
+	}
 	if len(p.Tests) == 0 || p.Tests[0] == "unknown" {
 		return errors.New("no verified test command was detected; target was not changed")
 	}
@@ -1589,8 +1381,12 @@ func worktrees(args []string, w io.Writer) error {
 			}
 			fmt.Fprintf(w, "Explicitly selected environment values copied for %s (sensitive values are not displayed)\n", strings.Join(orderedEnvironmentKeys, ", "))
 		}
+		p, analyzeErr := analyzer.Analyze(dest)
+		if analyzeErr != nil {
+			return fmt.Errorf("analyze created worktree: %w", analyzeErr)
+		}
 		if ide != "" {
-			if err = writeAgents(dest, analyze(dest), false, w); err != nil {
+			if err = writeAgents(dest, p, false, w); err != nil {
 				return fmt.Errorf("worktree created but canonical instructions could not be prepared: %w", err)
 			}
 			if err = agentcfg.Configure(dest, []string{ide}, false, w); err != nil {
@@ -1622,7 +1418,6 @@ func worktrees(args []string, w io.Writer) error {
 			}
 			envExcludeEntryAdded = true
 		}
-		p := analyze(dest)
 		var portInfo strings.Builder
 		for service, port := range allocated {
 			variable := strings.ToUpper(strings.ReplaceAll(service, "-", "_"))

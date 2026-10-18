@@ -1,6 +1,6 @@
 # Architecture
 
-The executable entrypoint is `cmd/ai-init`. Command behavior currently lives in `internal/cli`; repository fact detection and safe generation are deterministic and use the Go standard library. Process execution is argument-based. Future extraction should place analyzer, filesystem, adapter, and worktree domain logic in separate internal packages as their behavior grows.
+The executable entrypoint is `cmd/ai-init`. Command orchestration lives in `internal/cli`; repository fact detection is isolated in `internal/analyzer`, while adapters, hooks, environment snapshots, and port allocation have separate internal packages. Analysis and safe generation use the Go standard library. Process execution is argument-based. More of the CLI's remaining worktree, integration, and filesystem coordination can be extracted as those domains grow.
 
 Generated files are editable output. Existing custom `AGENTS.md` is not modified. Managed instruction and context blocks have visible markers; updates replace only those blocks and retain surrounding manual notes. Backups are kept on updates.
 

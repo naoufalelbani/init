@@ -13,8 +13,17 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/naoufalelbani/init/internal/analyzer"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
+
+func analyze(root string) project {
+	p, err := analyzer.Analyze(root)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}
 
 func TestAnalyzeGoProject(t *testing.T) {
 	root := t.TempDir()
