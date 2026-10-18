@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -1190,6 +1191,10 @@ func previewSync(root, taskWorktree, targetBranch string, out io.Writer) error {
 }
 
 func worktrees(args []string, w io.Writer) error {
+	return worktreesWithOpener(args, w, openWorktree)
+}
+
+func worktreesWithOpener(args []string, w io.Writer, open func(root, task, adapter string, out io.Writer) error) error {
 	if len(args) == 0 {
 		return errors.New("usage: ai-init wt new|open|list|status|sync|integrate|cleanup [task]")
 	}
@@ -1232,7 +1237,7 @@ func worktrees(args []string, w io.Writer) error {
 		if !slices.Contains(agentcfg.Names(), ide) {
 			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
 		}
-		return openWorktree(root, task, ide, w)
+		return open(root, task, ide, w)
 	}
 	if action == "list" {
 		value, err := git(root, "worktree", "list", "--porcelain")
@@ -1355,14 +1360,21 @@ func worktrees(args []string, w io.Writer) error {
 				fmt.Fprintf(w, "Would copy explicitly selected environment variables %s to an ignored task-local JSON file; values are not displayed\n", strings.Join(orderedEnvironmentKeys, ", "))
 			}
 			if ide != "" {
-				fmt.Fprintf(w, "Would configure %s instructions; IDE launch is not configured\n", ide)
+				fmt.Fprintf(w, "Would configure %s instructions\n", ide)
+				if _, _, launchErr := agentcfg.LaunchCommand(ide); launchErr != nil {
+					fmt.Fprintf(w, "No launcher available for %s; worktree will need to be opened manually\n", ide)
+				} else {
+					fmt.Fprintf(w, "Would open %s in the created worktree\n", ide)
+				}
 			}
 			return nil
 		}
-		releaseCreationLock, lockErr := acquireWorktreeCreationLock(root)
+		unlockCreation, lockErr := acquireWorktreeCreationLock(root)
 		if lockErr != nil {
 			return lockErr
 		}
+		var releaseOnce sync.Once
+		releaseCreationLock := func() { releaseOnce.Do(unlockCreation) }
 		defer releaseCreationLock()
 		if _, statErr := os.Lstat(dest); statErr == nil {
 			return fmt.Errorf("worktree path already exists: %s", dest)
@@ -1458,7 +1470,6 @@ func worktrees(args []string, w io.Writer) error {
 			if err = agentcfg.Configure(dest, []string{ide}, false, w); err != nil {
 				return fmt.Errorf("worktree created but adapter setup failed: %w", err)
 			}
-			fmt.Fprintln(w, "IDE launch is not configured; open the workspace path above in the selected tool.")
 		}
 		exclude, err = git(root, "rev-parse", "--git-path", "info/exclude")
 		if err != nil {
@@ -1505,6 +1516,12 @@ func worktrees(args []string, w io.Writer) error {
 		}
 		committed = true
 		fmt.Fprintf(w, "Created %s on branch %s\n", dest, branch)
+		releaseCreationLock()
+		if ide != "" {
+			if err := open(root, task, ide, w); err != nil {
+				return fmt.Errorf("worktree was created at %s, but %w", dest, err)
+			}
+		}
 		return nil
 	}
 	if len(args) < 2 {

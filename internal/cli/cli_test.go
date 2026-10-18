@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -891,6 +892,61 @@ func TestConcurrentWorktreeCreationUsesDistinctTasksSafely(t *testing.T) {
 		if err != nil || branch != "agent/"+task {
 			t.Fatalf("task %s branch=%q err=%v", task, branch, err)
 		}
+	}
+}
+
+func TestWorktreeNewWithIDEOpensOnlyAfterSetupAndLockRelease(t *testing.T) {
+	root, _ := integrationFixture(t, "new with IDE")
+	t.Chdir(root)
+	opened := false
+	open := func(gitRoot, task, adapter string, _ io.Writer) error {
+		opened = true
+		rootMatches := filepath.Clean(gitRoot) == filepath.Clean(root)
+		if runtime.GOOS == "windows" {
+			rootMatches = strings.EqualFold(filepath.Clean(gitRoot), filepath.Clean(root))
+		}
+		if !rootMatches || task != "auto-open" || adapter != "codex" {
+			t.Fatalf("opener received root=%q task=%q adapter=%q", gitRoot, task, adapter)
+		}
+		workspace := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", task)
+		if _, err := os.Stat(filepath.Join(workspace, "AGENTS.md")); err != nil {
+			t.Fatalf("instructions were not prepared before launch: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(workspace, ".agent-task.md")); err != nil {
+			t.Fatalf("task primer was not prepared before launch: %v", err)
+		}
+		lockPath := runGitTest(t, root, "rev-parse", "--git-path", "ai-init-worktree-create.lock")
+		if !filepath.IsAbs(lockPath) {
+			lockPath = filepath.Join(root, lockPath)
+		}
+		if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+			t.Fatalf("worktree creation lock still held while launching: %v", err)
+		}
+		return nil
+	}
+	var output bytes.Buffer
+	if err := worktreesWithOpener([]string{"new", "auto-open", "--ide", "codex"}, &output, open); err != nil {
+		t.Fatalf("create and open worktree: %v\n%s", err, output.String())
+	}
+	if !opened || !strings.Contains(output.String(), "Created ") {
+		t.Fatalf("worktree was not reported and opened: %s", output.String())
+	}
+}
+
+func TestWorktreeNewUnsupportedIDEReportsLaunchFailureAndRetainsWorktree(t *testing.T) {
+	root, _ := integrationFixture(t, "unsupported launch")
+	t.Chdir(root)
+	var output bytes.Buffer
+	err := worktreesWithOpener([]string{"new", "manual-open", "--ide", "antigravity"}, &output, openWorktree)
+	if err == nil || !strings.Contains(err.Error(), "not supported") || !strings.Contains(err.Error(), "worktree was created at") {
+		t.Fatalf("expected explicit post-creation launch error, got %v", err)
+	}
+	workspace := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", "manual-open")
+	if _, statErr := os.Stat(filepath.Join(workspace, ".git")); statErr != nil {
+		t.Fatalf("created worktree was incorrectly removed after unsupported launch: %v", statErr)
+	}
+	if !strings.Contains(output.String(), "Created ") {
+		t.Fatalf("successful worktree creation not reported before launch error: %s", output.String())
 	}
 }
 
