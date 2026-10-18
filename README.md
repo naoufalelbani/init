@@ -50,7 +50,7 @@ ai-init memory update
 - `analyze`: print detected stack, directories, and build/test hints.
 - `agents generate|audit|sync|validate|configure|list`: create managed instructions, configure adapters, or inspect support. Custom files are preserved.
 - `memory generate|update`: write `.ai/PROJECT_MAP.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CURRENT_STATE.md`, and `DECISIONS.md` from detected evidence. Managed sections refresh while manual text outside those markers is retained.
-- `wt new <task> [--ide ADAPTER] [--port SERVICE]`: create an `agent/<task>` branch in a sibling worktree directory and optionally configure instructions/allocate ports. Creation serializes concurrent ai-init processes; failed setup rolls back the newly created branch, worktree, ignore entry, and port allocations. IDE windows are not launched automatically yet.
+- `wt new <task> [--ide ADAPTER] [--port SERVICE] [--env NAME]`: create an `agent/<task>` branch in a sibling worktree directory and optionally configure instructions, allocate ports, or propagate explicitly selected process environment variables. Creation serializes concurrent ai-init processes; failed setup rolls back the newly created branch, worktree, ignore entries, environment snapshot, and port allocations. IDE windows are not launched automatically yet.
 - `wt list|status [task]|sync <task> [--dry-run]|integrate <task> [--dry-run]|cleanup <task> [--dry-run]`: inspect, preview or sync, validate and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch.
 - `ports allocate|list|release`: manage explicit, per-task service port records.
 - `prompt agents|worktrees|audit|config`: display a reusable prompt or export it with `--output FILE` (existing files are never overwritten).
@@ -68,6 +68,7 @@ The adapter locations and formats follow vendor documentation: [Antigravity rule
 ai-init wt new api-endpoint --ide antigravity --port api
 ai-init wt new ui-form
 ai-init wt new docs
+ai-init wt new integration-task --env DATABASE_URL --env API_TOKEN
 ai-init wt list
 ai-init wt integrate api-endpoint
 ```
@@ -91,9 +92,10 @@ Use focused changes, Go formatting, and standard library APIs where practical. R
 ## Limitations
 
 - IDE launch is not implemented; `--ide` prepares supported instruction files and prints the workspace path.
+- Environment values are never copied by default. Each repeated `--env NAME` explicitly selects a variable from ai-init's process environment. Selected values are stored in the ignored `.ai-init.env.json` task-local file and named in the task primer; the values are never printed. Treat this file as sensitive, review it before sharing the workspace, and do not commit it. On Windows the file inherits the containing directory's ACL; on Unix it is created with owner-only permissions.
 - A free port is chosen and recorded, then its temporary socket is closed. The record is not a persistent socket reservation, and ai-init does not automatically inject environment variables into a service process.
 - Graphify and Serena are detected but not called through their tool interfaces.
-- Setup does not propagate environment files, install Git hooks, generate `.gitattributes`, or isolate databases. It never copies secrets automatically.
+- Setup does not propagate environment files, install Git hooks, generate `.gitattributes`, or isolate databases. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
 - Existing unmarked agent configuration is preserved as-is; run the corresponding tool's own validator after manual edits.
 - Static detection may miss monorepo packages, custom scripts, and project-specific test conventions; inspect `analyze` output before relying on generated hints.
 

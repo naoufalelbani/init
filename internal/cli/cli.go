@@ -18,6 +18,7 @@ import (
 	"time"
 
 	agentcfg "github.com/naoufalelbani/init/internal/agents"
+	envprop "github.com/naoufalelbani/init/internal/environment"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
@@ -77,7 +78,8 @@ Usage:
   ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME] [--diff]
   ai-init memory generate|update [--path DIR]
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
-  ai-init wt new|list|status|sync|integrate|cleanup [TASK]
+  ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--dry-run]
+  ai-init wt list|status|sync|integrate|cleanup [TASK]
   ai-init prompt agents|worktrees|audit|config [--output FILE] [--dry-run]
   ai-init doctor
   ai-init version`)
@@ -488,7 +490,7 @@ func runValidationCommand(dir, command string, stdout, stderr io.Writer) error {
 	return cmd.Run()
 }
 
-func removeTaskPrimerIgnore(path string) error {
+func removeMarkedIgnore(path, marker, pattern string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -503,13 +505,38 @@ func removeTaskPrimerIgnore(path string) error {
 	lines := strings.Split(string(data), "\n")
 	kept := lines[:0]
 	for i := 0; i < len(lines); i++ {
-		if strings.TrimSuffix(lines[i], "\r") == "# ai-init task-local primer" && i+1 < len(lines) && strings.TrimSuffix(lines[i+1], "\r") == ".agent-task.md" {
+		if strings.TrimSuffix(lines[i], "\r") == marker && i+1 < len(lines) && strings.TrimSuffix(lines[i+1], "\r") == pattern {
 			i++
 			continue
 		}
 		kept = append(kept, lines[i])
 	}
 	return os.WriteFile(path, []byte(strings.Join(kept, "\n")), info.Mode().Perm())
+}
+
+func hasIgnorePattern(data []byte, pattern string) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(strings.TrimSuffix(line, "\r")) == pattern {
+			return true
+		}
+	}
+	return false
+}
+
+func appendIgnoreBlock(path, marker, pattern string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := fmt.Fprintf(file, "\n%s\n%s\n", marker, pattern)
+	closeErr := file.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 func acquireWorktreeCreationLock(root string) (func(), error) {
@@ -1328,6 +1355,7 @@ func worktrees(args []string, w io.Writer) error {
 		ide := ""
 		dry := false
 		var services []string
+		var environmentKeys []string
 		for i := 2; i < len(args); i++ {
 			switch args[i] {
 			case "--ide":
@@ -1342,6 +1370,12 @@ func worktrees(args []string, w io.Writer) error {
 				}
 				i++
 				services = append(services, args[i])
+			case "--env":
+				if i+1 >= len(args) {
+					return errors.New("--env requires an environment variable name")
+				}
+				i++
+				environmentKeys = append(environmentKeys, args[i])
 			case "--dry-run":
 				dry = true
 			case "--worktree-parent":
@@ -1357,6 +1391,10 @@ func worktrees(args []string, w io.Writer) error {
 			return fmt.Errorf("unsupported adapter %q; run 'ai-init agents list'", ide)
 		}
 		ide = strings.ToLower(ide)
+		environmentValues, orderedEnvironmentKeys, environmentErr := envprop.CaptureProcess(environmentKeys)
+		if environmentErr != nil {
+			return environmentErr
+		}
 		branch := "agent/" + task
 		if existing, _ := git(root, "branch", "--list", branch); existing != "" {
 			return fmt.Errorf("branch already exists: %s", branch)
@@ -1370,6 +1408,9 @@ func worktrees(args []string, w io.Writer) error {
 				fmt.Fprintf(w, "Would allocate %s port %d\n", service, port)
 			}
 			fmt.Fprintf(w, "Would create worktree %s on branch %s\n", dest, branch)
+			if len(orderedEnvironmentKeys) > 0 {
+				fmt.Fprintf(w, "Would copy explicitly selected environment variables %s to an ignored task-local JSON file; values are not displayed\n", strings.Join(orderedEnvironmentKeys, ", "))
+			}
 			if ide != "" {
 				fmt.Fprintf(w, "Would configure %s instructions; IDE launch is not configured\n", ide)
 			}
@@ -1423,6 +1464,7 @@ func worktrees(args []string, w io.Writer) error {
 		committed := false
 		exclude := ""
 		excludeEntryAdded := false
+		envExcludeEntryAdded := false
 		defer func() {
 			if committed {
 				return
@@ -1445,11 +1487,23 @@ func worktrees(args []string, w io.Writer) error {
 				}
 			}
 			if excludeEntryAdded && exclude != "" {
-				if cleanupErr := removeTaskPrimerIgnore(exclude); cleanupErr != nil {
+				if cleanupErr := removeMarkedIgnore(exclude, "# ai-init task-local primer", ".agent-task.md"); cleanupErr != nil {
 					fmt.Fprintf(w, "Recovery needed: remove ai-init task primer ignore entry from %s manually: %v\n", exclude, cleanupErr)
 				}
 			}
+			if envExcludeEntryAdded && exclude != "" {
+				if cleanupErr := removeMarkedIgnore(exclude, "# ai-init local environment snapshot", ".ai-init.env.json"); cleanupErr != nil {
+					fmt.Fprintf(w, "Recovery needed: remove ai-init environment ignore entry from %s manually: %v\n", exclude, cleanupErr)
+				}
+			}
 		}()
+		if len(environmentValues) > 0 {
+			envPath := filepath.Join(dest, ".ai-init.env.json")
+			if err = envprop.WriteSnapshot(envPath, environmentValues); err != nil {
+				return fmt.Errorf("create explicit task environment snapshot: %w", err)
+			}
+			fmt.Fprintf(w, "Explicitly selected environment values copied for %s (sensitive values are not displayed)\n", strings.Join(orderedEnvironmentKeys, ", "))
+		}
 		if ide != "" {
 			if err = writeAgents(dest, analyze(dest), false, w); err != nil {
 				return fmt.Errorf("worktree created but canonical instructions could not be prepared: %w", err)
@@ -1470,23 +1524,18 @@ func worktrees(args []string, w io.Writer) error {
 		if readErr != nil && !os.IsNotExist(readErr) {
 			return readErr
 		}
-		if !strings.Contains(string(ignore), ".agent-task.md") {
-			if err = os.MkdirAll(filepath.Dir(exclude), 0755); err != nil {
+		if !hasIgnorePattern(ignore, ".agent-task.md") {
+			if err = appendIgnoreBlock(exclude, "# ai-init task-local primer", ".agent-task.md"); err != nil {
 				return err
 			}
-			f, openErr := os.OpenFile(exclude, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-			if openErr != nil {
-				return openErr
-			}
-			_, writeErr := f.WriteString("\n# ai-init task-local primer\n.agent-task.md\n")
-			closeErr := f.Close()
-			if writeErr != nil {
-				return writeErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
 			excludeEntryAdded = true
+			ignore = append(ignore, []byte("\n# ai-init task-local primer\n.agent-task.md\n")...)
+		}
+		if len(environmentValues) > 0 && !hasIgnorePattern(ignore, ".ai-init.env.json") {
+			if err = appendIgnoreBlock(exclude, "# ai-init local environment snapshot", ".ai-init.env.json"); err != nil {
+				return err
+			}
+			envExcludeEntryAdded = true
 		}
 		p := analyze(dest)
 		var portInfo strings.Builder
@@ -1497,7 +1546,11 @@ func worktrees(args []string, w io.Writer) error {
 		if portInfo.Len() == 0 {
 			portInfo.WriteString("- None allocated; use `ai-init wt new <task> --port <service>` when a project needs a dedicated port.\n")
 		}
-		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: `AGENTS.md`\n- Architecture references: `README.md` and existing `docs/` files when present\n- Verification hints: %s\n\n## Port allocations\n%s\nDo not copy `.env` files or secrets. Do not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch, joinOrUnknown(p.Tests), portInfo.String())
+		environmentInfo := "No environment variables were propagated. Do not copy `.env` files or secrets."
+		if len(orderedEnvironmentKeys) > 0 {
+			environmentInfo = fmt.Sprintf("An explicit allowlist was copied to ignored `.ai-init.env.json`: %s. Its values may be sensitive; load only what the task requires and never commit the file.", strings.Join(orderedEnvironmentKeys, ", "))
+		}
+		primer := fmt.Sprintf("# Task workspace\n\n- Task: %s\n- Workspace: %s\n- Branch: %s\n- Instructions: `AGENTS.md`\n- Architecture references: `README.md` and existing `docs/` files when present\n- Verification hints: %s\n\n## Port allocations\n%s\n## Environment\n%s\n\nDo not edit another worktree. Preserve unrelated changes. Report files changed and verification performed.\n", task, dest, branch, joinOrUnknown(p.Tests), portInfo.String(), environmentInfo)
 		if err = os.WriteFile(filepath.Join(dest, ".agent-task.md"), []byte(primer), 0644); err != nil {
 			return fmt.Errorf("worktree created but task primer failed: %w", err)
 		}

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -650,6 +651,7 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".aider.conf.yml"), []byte("# <!-- ai-init adapter:begin -->\ntruncated\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("AI_INIT_TEST_ROLLBACK_SECRET", "rollback secret value")
 	gitExclude := runGitTest(t, root, "rev-parse", "--git-path", "info/exclude")
 	if !filepath.IsAbs(gitExclude) {
 		gitExclude = filepath.Join(root, gitExclude)
@@ -665,7 +667,7 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	destinationParent := filepath.Join(t.TempDir(), "worktree parent")
 	t.Chdir(root)
 	var output bytes.Buffer
-	err := worktrees([]string{"new", "rollback", "--ide", "aider", "--port", "api", "--worktree-parent", destinationParent}, &output)
+	err := worktrees([]string{"new", "rollback", "--ide", "aider", "--port", "api", "--env", "AI_INIT_TEST_ROLLBACK_SECRET", "--worktree-parent", destinationParent}, &output)
 	if err == nil {
 		t.Fatal("expected adapter error")
 	}
@@ -690,6 +692,71 @@ func TestWorktreeCreationFailureRollsBackBranchWorktreeAndPorts(t *testing.T) {
 	if string(ignore) != "# user's ignore rule\n*.local\n" {
 		t.Fatalf("rollback modified unrelated exclude content: %q", ignore)
 	}
+}
+
+func TestWorktreeEnvironmentPropagationRequiresAllowlistAndStaysIgnored(t *testing.T) {
+	root, _ := integrationFixture(t, "env propagation")
+	t.Setenv("AI_INIT_TEST_TOKEN", "secret value with $ and quotes \" ")
+	t.Setenv("AI_INIT_TEST_UNSELECTED", "must not be copied")
+	t.Chdir(root)
+	var output bytes.Buffer
+	if err := worktrees([]string{"new", "env-task", "--env", "AI_INIT_TEST_TOKEN"}, &output); err != nil {
+		t.Fatalf("create worktree: %v\n%s", err, output.String())
+	}
+	dest := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", "env-task")
+	data, err := os.ReadFile(filepath.Join(dest, ".ai-init.env.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var values map[string]string
+	if err = json.Unmarshal(data, &values); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values["AI_INIT_TEST_TOKEN"] != `secret value with $ and quotes " ` {
+		t.Fatalf("unexpected allowlisted environment snapshot: %#v", values)
+	}
+	if strings.Contains(output.String(), "secret value") || strings.Contains(string(mustRead(t, filepath.Join(dest, ".agent-task.md"))), "secret value") {
+		t.Fatal("secret value leaked into CLI output or task primer")
+	}
+	if !strings.Contains(string(mustRead(t, filepath.Join(dest, ".agent-task.md"))), "AI_INIT_TEST_TOKEN") {
+		t.Fatal("task primer does not describe the explicit allowlist")
+	}
+	if _, err = git(dest, "check-ignore", "--", ".ai-init.env.json"); err != nil {
+		t.Fatalf("environment snapshot is not ignored: %v", err)
+	}
+	status, err := git(dest, "status", "--porcelain")
+	if err != nil || status != "" {
+		t.Fatalf("task-local environment file appears in Git status: %q err=%v", status, err)
+	}
+}
+
+func TestWorktreeEnvironmentDryRunDoesNotWriteOrPrintValues(t *testing.T) {
+	root, _ := integrationFixture(t, "env dry run")
+	t.Setenv("AI_INIT_TEST_DRY_SECRET", "dry run secret")
+	t.Chdir(root)
+	var output bytes.Buffer
+	if err := worktrees([]string{"new", "env-preview", "--env", "AI_INIT_TEST_DRY_SECRET", "--dry-run"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "dry run secret") || !strings.Contains(output.String(), "AI_INIT_TEST_DRY_SECRET") {
+		t.Fatalf("unsafe or missing dry-run report: %s", output.String())
+	}
+	if branch, err := git(root, "branch", "--list", "agent/env-preview"); err != nil || branch != "" {
+		t.Fatalf("dry-run created branch: %q err=%v", branch, err)
+	}
+	path := filepath.Join(filepath.Dir(root), filepath.Base(root)+"-worktrees", "env-preview")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dry-run created worktree: %v", err)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestWorktreeCreationProcessHelper(t *testing.T) {
