@@ -35,6 +35,7 @@ const postgresOperationTimeout = 2 * time.Minute
 // runPostgresClient is the process seam for database lifecycle tests. Production
 // uses argument-based execution and never logs client output or credentials.
 var runPostgresClient postgres.Runner = postgres.ExecRunner
+var reuseInstalledIndexers = indexing.UseInstalled
 
 type project = analyzer.Project
 
@@ -86,10 +87,10 @@ func usage(w io.Writer) {
 	fmt.Fprintln(w, `ai-init initializes AI-assisted development environments.
 
 Usage:
-  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory,gitattributes,hooks]
+  ai-init setup [--path DIR] [--dry-run|--diff] [--with agents,worktrees,memory,gitattributes,hooks] [--use-indexers]
   ai-init analyze [--path DIR]
   ai-init agents generate|audit|sync|validate|configure|list [--path DIR] [--adapter NAME] [--diff]
-  ai-init memory generate|update [--path DIR]
+  ai-init memory generate|update [--path DIR] [--use-indexers]
   ai-init ports allocate|list|release [TASK] [SERVICE] [--path DIR]
   ai-init hooks check-staged [--path DIR]
   ai-init wt new <TASK> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--isolate-postgres-env NAME --postgres-admin-env NAME] [--dry-run]
@@ -208,6 +209,7 @@ func setup(args []string, w io.Writer) error {
 	with := fs.String("with", "agents,memory", "comma-separated components: agents,worktrees,memory,gitattributes,hooks")
 	adapters := fs.String("adapters", "", "comma-separated agent adapters; empty detects existing configuration")
 	verbose := fs.Bool("verbose", false, "show details")
+	useIndexers := fs.Bool("use-indexers", false, "reuse existing Serena or Graphify indexes while generating memory (explicit opt-in)")
 	if e := fs.Parse(args); e != nil {
 		return e
 	}
@@ -237,6 +239,9 @@ func setup(args []string, w io.Writer) error {
 	if len(splitList(*adapters)) > 0 && !selected["agents"] {
 		return errors.New("--adapters requires the agents component in --with")
 	}
+	if *useIndexers && !selected["memory"] {
+		return errors.New("--use-indexers requires the memory component in --with")
+	}
 	p, e := analyzer.Analyze(root)
 	if e != nil {
 		return e
@@ -264,7 +269,7 @@ func setup(args []string, w io.Writer) error {
 		}
 	}
 	if selected["memory"] {
-		if e := writeMemory(root, p, *dry, w); e != nil {
+		if e := writeMemoryWithIndexers(root, p, *dry, *useIndexers, w); e != nil {
 			return e
 		}
 	}
@@ -694,6 +699,10 @@ func writeGitAttributes(root string, gitRepo, dry bool, w io.Writer) error {
 }
 
 func writeMemory(root string, p project, dry bool, w io.Writer) error {
+	return writeMemoryWithIndexers(root, p, dry, false, w)
+}
+
+func writeMemoryWithIndexers(root string, p project, dry, useIndexers bool, w io.Writer) error {
 	inventory, err := indexing.Discover(root, p.Git)
 	if err != nil {
 		return fmt.Errorf("discover project source files: %w", err)
@@ -711,11 +720,20 @@ func writeMemory(root string, p project, dry bool, w io.Writer) error {
 	if inventory.Truncated {
 		inventoryStatus += " (list truncated)"
 	}
+	indexerContext := indexing.IndexerContext{SerenaStatus: "not requested", GraphifyStatus: "not requested"}
+	if useIndexers && dry {
+		indexerContext.SerenaStatus = "skipped (dry-run; no indexer commands run)"
+		indexerContext.GraphifyStatus = "skipped (dry-run; no indexer commands run)"
+		fmt.Fprintln(w, "  indexers: skipped (dry-run; no indexer commands run)")
+	} else if useIndexers {
+		indexerContext = reuseInstalledIndexers(root, nil, nil)
+		fmt.Fprintf(w, "  Serena: %s\n  Graphify: %s\n", indexerContext.SerenaStatus, indexerContext.GraphifyStatus)
+	}
 	items := map[string]string{
-		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from repository metadata and source paths only. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Dependency managers: %s\n- Source directories: %s\n- Entry points: %s\n- Source file inventory (%s): %s\n- Build hints: %s\n- Test hints: %s\n", markdownFacts([]string{p.Name}), markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.DependencyManagers), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), inventoryStatus, markdownFacts(inventory.Files), markdownFacts(p.Build), markdownFacts(p.Tests)),
+		"PROJECT_MAP.md":   fmt.Sprintf("# Project map\n\nThese facts come from repository metadata, source paths, and (when explicitly enabled) safe structural index summaries. Verify them against source before relying on them.\n\n- Name: %s\n- Languages: %s\n- Frameworks: %s\n- Dependency managers: %s\n- Source directories: %s\n- Entry points: %s\n- Source file inventory (%s): %s\n- Graphify structural hubs: %s\n- Build hints: %s\n- Test hints: %s\n", markdownFacts([]string{p.Name}), markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.DependencyManagers), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), inventoryStatus, markdownFacts(inventory.Files), markdownFacts(indexerContext.GraphifyHubs), markdownFacts(p.Build), markdownFacts(p.Tests)),
 		"ARCHITECTURE.md":  fmt.Sprintf("# Architecture context\n\n## Verified repository facts\n- Languages: %s\n- Frameworks: %s\n- Source directories: %s\n- Entry points: %s\n- Platform and deployment evidence: %s\n- Build hints: %s\n- Test hints: %s\n\n## Boundaries\nThe deterministic scan does not infer UI/backend or module ownership boundaries. Treat those as unknown until confirmed in source and project documentation.\n", markdownFacts(p.Languages), markdownFacts(p.Frameworks), markdownFacts(p.Sources), markdownFacts(p.EntryPoints), markdownFacts(p.PlatformRequirements), markdownFacts(p.Build), markdownFacts(p.Tests)),
 		"CONVENTIONS.md":   fmt.Sprintf("# Detected conventions\n\nFormatting and lint configuration files: %s. Their contents define the authoritative rules. Git convention files: %s. Dependency managers: %s. Existing agent instruction sources: %s. No additional naming or style conventions are inferred here.\n", markdownFacts(p.Configurations), markdownFacts(p.GitConventions), markdownFacts(p.DependencyManagers), markdownFacts(p.AgentInstructions)),
-		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n", p.Git, markdownFacts([]string{branch}), markdownFacts([]string{head}), markdownFacts(p.Indexers)),
+		"CURRENT_STATE.md": fmt.Sprintf("# Current repository state\n\n- Git repository: %t\n- Current branch: %s\n- HEAD: %s\n- Working tree file changes are not captured in this summary.\n- Detected indexer or MCP configuration: %s\n- Serena indexer: %s\n- Graphify indexer: %s\n", p.Git, markdownFacts([]string{branch}), markdownFacts([]string{head}), markdownFacts(p.Indexers), markdownFacts([]string{indexerContext.SerenaStatus}), markdownFacts([]string{indexerContext.GraphifyStatus})),
 		"DECISIONS.md":     "# Project decisions\n\nThe deterministic analyzer does not infer design decisions. Record manually approved decisions below.\n",
 	}
 	for _, name := range []string{"PROJECT_MAP.md", "ARCHITECTURE.md", "CONVENTIONS.md", "CURRENT_STATE.md", "DECISIONS.md"} {
@@ -839,6 +857,7 @@ func memory(args []string, w io.Writer) error {
 	fs.SetOutput(io.Discard)
 	path := fs.String("path", ".", "project path")
 	dry := fs.Bool("dry-run", false, "preview without writing")
+	useIndexers := fs.Bool("use-indexers", false, "reuse existing Serena or Graphify indexes (explicit opt-in)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -853,7 +872,7 @@ func memory(args []string, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return writeMemory(root, p, *dry, w)
+	return writeMemoryWithIndexers(root, p, *dry, *useIndexers, w)
 }
 
 func ports(args []string, w io.Writer) error {

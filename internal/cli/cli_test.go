@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/naoufalelbani/init/internal/analyzer"
+	"github.com/naoufalelbani/init/internal/indexing"
 	portalloc "github.com/naoufalelbani/init/internal/ports"
 )
 
@@ -524,6 +525,66 @@ func TestMemoryGeneratesEvidenceFilesAndPreservesManualNotes(t *testing.T) {
 	}
 	if !strings.Contains(string(conventions), ".editorconfig") || !strings.Contains(string(conventions), "Go modules") {
 		t.Fatalf("project configuration or dependency-manager evidence missing: %s", conventions)
+	}
+}
+
+func TestMemoryIndexerOptInDryRunDoesNotInvokeOrWrite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".serena"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".serena", "project.yml"), []byte("language: go\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := Run([]string{"memory", "generate", "--path", root, "--use-indexers", "--dry-run"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "dry-run; no indexer commands run") {
+		t.Fatalf("missing opt-in dry-run report: %s", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, ".ai")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote project context: %v", err)
+	}
+}
+
+func TestMemoryIncludesOnlyReturnedStructuralIndexerSummary(t *testing.T) {
+	root := t.TempDir()
+	wantContext := indexing.IndexerContext{
+		SerenaStatus:   "symbol index refreshed",
+		GraphifyStatus: "existing graph queried; 1 hubs included",
+		GraphifyHubs:   []string{"internal/indexing (degree 12)"},
+	}
+	previous := reuseInstalledIndexers
+	reuseInstalledIndexers = func(gotRoot string, _ indexing.LookupFunc, _ indexing.CommandFunc) indexing.IndexerContext {
+		if gotRoot != root {
+			t.Fatalf("root=%q want=%q", gotRoot, root)
+		}
+		return wantContext
+	}
+	t.Cleanup(func() { reuseInstalledIndexers = previous })
+	var output bytes.Buffer
+	if err := Run([]string{"memory", "generate", "--path", root, "--use-indexers"}, &output, &output); err != nil {
+		t.Fatal(err)
+	}
+	projectMap, err := os.ReadFile(filepath.Join(root, ".ai", "PROJECT_MAP.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(filepath.Join(root, ".ai", "CURRENT_STATE.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(projectMap), "internal/indexing (degree 12)") || !strings.Contains(string(current), "symbol index refreshed") || !strings.Contains(output.String(), "existing graph queried; 1 hubs included") {
+		t.Fatalf("indexer summary did not reach generated context/report:\n%s\n%s\n%s", projectMap, current, output.String())
+	}
+}
+
+func TestSetupIndexerOptInRequiresMemory(t *testing.T) {
+	var output bytes.Buffer
+	err := Run([]string{"setup", "--with", "agents", "--use-indexers"}, &output, &output)
+	if err == nil || !strings.Contains(err.Error(), "requires the memory component") {
+		t.Fatalf("expected memory requirement, got %v", err)
 	}
 }
 

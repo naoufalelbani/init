@@ -37,6 +37,7 @@ ai-init doctor
 ai-init setup --path "../my project" --dry-run
 ai-init setup --diff
 ai-init setup --with agents,memory,worktrees
+ai-init setup --with agents,memory --use-indexers
 ai-init setup --with gitattributes
 ai-init setup --with hooks
 ai-init setup --adapters claude,cursor,copilot,aider
@@ -44,6 +45,7 @@ ai-init agents audit
 ai-init agents sync --diff
 ai-init agents list
 ai-init memory update
+ai-init memory update --use-indexers
 ```
 
 ## Commands
@@ -51,7 +53,7 @@ ai-init memory update
 - `setup`: analyze a repository and generate selected artifacts.
 - `analyze`: print detected stack, directories, and build/test hints.
 - `agents generate|audit|sync|validate|configure|list`: create managed instructions, configure adapters, or inspect support. Custom files are preserved.
-- `memory generate|update`: write `.ai/PROJECT_MAP.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CURRENT_STATE.md`, and `DECISIONS.md` from detected evidence. Managed sections refresh while manual text outside those markers is retained.
+- `memory generate|update [--use-indexers]`: write `.ai/PROJECT_MAP.md`, `ARCHITECTURE.md`, `CONVENTIONS.md`, `CURRENT_STATE.md`, and `DECISIONS.md` from detected evidence. Managed sections refresh while manual text outside those markers is retained. Indexers are not called by default. With `--use-indexers`, an existing `.serena/project.yml` permits a Serena index refresh, and an existing `graphify-out/graph.json` permits a Graphify god-nodes query. No tool is installed; missing or failed indexers fall back to the deterministic scan. Graphify output is reduced to a few validated structural labels, with raw command output discarded. Dry runs never invoke indexers.
 - `wt new <task> [--ide ADAPTER] [--port SERVICE] [--env NAME] [--isolate-postgres-env NAME --postgres-admin-env NAME]`: create an `agent/<task>` branch in a sibling worktree directory and optionally configure instructions, allocate ports, propagate explicitly selected environment variables, or provision one task-local PostgreSQL database. Creation serializes concurrent ai-init processes; failed setup rolls back the newly created branch, worktree, successfully provisioned database, environment snapshot, and port allocations. If the client reports an ambiguous create failure, ai-init retains recovery metadata and does not issue an automatic drop. When `--ide` is supplied, ai-init configures that adapter and launches it after creation if a supported launcher is available.
 - `wt open <task> --ide ADAPTER`: open a task worktree with Cursor, Codex, Claude Code, OpenCode, or Aider. Terminal agents run interactively in the worktree and keep the command attached until they exit. Antigravity, Cline, Copilot, and Windsurf launch commands are not implemented; those adapters still support instruction configuration.
 - `wt list|status [task]|sync <task> [--dry-run]|integrate <task> [--dry-run]|cleanup <task> [--dry-run] [--drop-database --postgres-admin-env NAME]`: inspect, preview or sync, validate and integrate, or safely remove clean worktrees. Cleanup refuses uncommitted changes or a branch not integrated into the current branch. A task with a provisioned database also requires the explicit drop option and matching administrator endpoint.
@@ -106,7 +108,7 @@ Use focused changes, Go formatting, and standard library APIs where practical. R
 - `wt new --ide` launches supported adapters after creating and configuring the worktree; the worktree-creation lock is released before the interactive tool starts. If the adapter has no verified launcher or the executable is missing, creation remains complete and ai-init reports the workspace path and launch problem. Use `wt open <task> --ide <adapter>` to reopen a supported tool later. Launch commands are currently unavailable for Antigravity, Cline, GitHub Copilot, and Windsurf; their instruction adapters remain usable.
 - Environment values are never copied by default. Each repeated `--env NAME` explicitly selects a variable from ai-init's process environment. Selected values are stored in the ignored `.ai-init.env.json` task-local file and named in the task primer; values are never printed. For PostgreSQL only, `--isolate-postgres-env NAME --postgres-admin-env NAME` explicitly provisions a unique task database on the same host and port, rewrites the selected application URL, and requires `createdb` and `dropdb` on `PATH`. The admin URL is used only in memory and a temporary PostgreSQL passfile; its variable is removed from the child client environment, and the URL is not stored in the snapshot. The URL parser intentionally accepts only one TCP host, simple ASCII role and maintenance-database names, and optional `sslmode`. Cleanup requires `--drop-database` and the matching admin endpoint after the worktree is clean and integrated. This does not provision a server or isolate other database engines. Treat environment snapshots as sensitive and do not commit them. On Windows the file inherits the containing directory's ACL; on Unix it is created with owner-only permissions.
 - A free port is chosen and recorded, then its temporary socket is closed. The record is not a persistent socket reservation, and ai-init does not automatically inject environment variables into a service process.
-- Graphify and Serena are detected but not called through their tool interfaces.
+- Graphify and Serena are detected by default but not invoked. Explicit `--use-indexers` opts into the documented local CLI interfaces for an existing Serena project configuration or conventional Graphify graph; failures use the deterministic fallback. Only filtered Graphify structural labels are persisted, and no indexer is installed.
 - Setup does not propagate environment files or provision databases. The opt-in worktree PostgreSQL path does not support other engines or multi-host/Unix-socket URLs. `.gitattributes` support is explicit opt-in and is skipped when tracked files exist, because applying text attributes can make existing checkouts appear modified. Git hook checks are local safeguards, inspect staged additions only, and can be bypassed; existing/custom hook systems are preserved. Worktree environment propagation is opt-in by variable name; no `.env` files are copied.
 - Existing unmarked agent configuration is preserved as-is; run the corresponding tool's own validator after manual edits.
 - Static detection may miss monorepo packages, custom scripts, and project-specific test conventions; inspect `analyze` output before relying on generated hints.
